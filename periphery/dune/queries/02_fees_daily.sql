@@ -1,8 +1,9 @@
 -- vltUSDC · 02 — realized fees, daily + cumulative
 -- The complete realized-fee picture from the vault's own events (AUDIT.MD §7a identity):
---   realized fees = Σ Compound.fee0/fee1  +  Σ FeesRetained.fee0/fee1
---   keeper cut    = Σ Compound.finder0/finder1 (1% of each fresh harvest)
+--   realized fees = Σ Compound.vltFees/usdcFees  +  Σ FeesRetained.vltFees/usdcFees
+--   keeper cut    = Σ Compound.vltFinder/usdcFinder (1% of each fresh harvest)
 --   supply-side   = fees − keeper cut (auto-compounded to shareholders); protocol take = 0.
+-- Event amounts are token-named (vlt* 18d / usdc* 6d) — no currency0/1 mapping needed.
 -- USD: VLT leg valued at the pool's own daily price; USDC leg at $1.00 (swap in prices.usd
 -- if exactness beyond the peg is wanted).
 -- Tables: vltusdc_ethereum.VltUsdcVault_evt_{Compound,FeesRetained}   ← namespace chosen at
@@ -25,14 +26,14 @@ pool AS (
 ),
 all_fees AS (
   SELECT evt_block_time,
-         CAST(fee0 AS DOUBLE) AS fee0, CAST(fee1 AS DOUBLE) AS fee1,
-         CAST(finder0 AS DOUBLE) AS finder0, CAST(finder1 AS DOUBLE) AS finder1,
+         CAST("vltFees" AS DOUBLE) AS fee_vlt_raw, CAST("usdcFees" AS DOUBLE) AS fee_usdc_raw,
+         CAST("vltFinder" AS DOUBLE) AS finder_vlt_raw, CAST("usdcFinder" AS DOUBLE) AS finder_usdc_raw,
          'compound' AS source
   FROM vltusdc_ethereum.VltUsdcVault_evt_Compound, params
   WHERE contract_address = params.vault
   UNION ALL
   SELECT evt_block_time,
-         CAST(fee0 AS DOUBLE), CAST(fee1 AS DOUBLE),
+         CAST("vltFees" AS DOUBLE), CAST("usdcFees" AS DOUBLE),
          0e0, 0e0,
          'retained'                    -- harvested by deposit/redeem: reinvests 100%, no finder cut
   FROM vltusdc_ethereum.VltUsdcVault_evt_FeesRetained, params
@@ -60,14 +61,14 @@ price_filled AS (
 ),
 daily AS (
   SELECT CAST(evt_block_time AS DATE) AS day,
-         SUM(fee0) / 1e18                                        AS fee_vlt,
-         SUM(fee1) / 1e6                                         AS fee_usdc,
-         SUM(CASE WHEN source = 'compound' THEN fee0 ELSE 0 END) / 1e18 AS fee_vlt_compound,
-         SUM(CASE WHEN source = 'retained' THEN fee0 ELSE 0 END) / 1e18 AS fee_vlt_retained,
-         SUM(CASE WHEN source = 'compound' THEN fee1 ELSE 0 END) / 1e6  AS fee_usdc_compound,
-         SUM(CASE WHEN source = 'retained' THEN fee1 ELSE 0 END) / 1e6  AS fee_usdc_retained,
-         SUM(finder0) / 1e18                                     AS finder_vlt,
-         SUM(finder1) / 1e6                                      AS finder_usdc
+         SUM(fee_vlt_raw) / 1e18                                        AS fee_vlt,
+         SUM(fee_usdc_raw) / 1e6                                        AS fee_usdc,
+         SUM(CASE WHEN source = 'compound' THEN fee_vlt_raw ELSE 0 END) / 1e18 AS fee_vlt_compound,
+         SUM(CASE WHEN source = 'retained' THEN fee_vlt_raw ELSE 0 END) / 1e18 AS fee_vlt_retained,
+         SUM(CASE WHEN source = 'compound' THEN fee_usdc_raw ELSE 0 END) / 1e6  AS fee_usdc_compound,
+         SUM(CASE WHEN source = 'retained' THEN fee_usdc_raw ELSE 0 END) / 1e6  AS fee_usdc_retained,
+         SUM(finder_vlt_raw) / 1e18                                     AS finder_vlt,
+         SUM(finder_usdc_raw) / 1e6                                     AS finder_usdc
   FROM all_fees
   GROUP BY 1
 )

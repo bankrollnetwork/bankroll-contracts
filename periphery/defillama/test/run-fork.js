@@ -17,11 +17,11 @@ const { makeFetch } = require("../fees/index.local");
 
 const VAULT_ABI = [
   "function totalSupply() view returns (uint256)",
-  "function previewRedeem(uint256) view returns (uint256 amount0, uint256 amount1)",
+  "function previewRedeem(uint256) view returns (uint256 vltAmount, uint256 usdcAmount)",
   "function vlt() view returns (address)",
   "function usdc() view returns (address)",
   "function positionLiquidity() view returns (uint128)",
-  "function compoundClaimable() view returns (uint256 amount0, uint256 amount1, uint256 valueUsdc, uint256 feesValueUsdc)",
+  "function compoundClaimable() view returns (uint256 vltAmount, uint256 usdcAmount, uint256 valueUsdc, uint256 feesValueUsdc)",
 ];
 
 const fmt = (raw, dec) => Number(ethers.formatUnits(raw, dec)).toLocaleString("en-US", { maximumFractionDigits: 4 });
@@ -47,13 +47,13 @@ async function main() {
   // ── TVL (mirrors tvl/index.js) ─────────────────────────────────────────────
   const api = new MockChainApi(provider);
   const supply = await api.call({ abi: "uint256:totalSupply", target: vaultAddr });
-  const [amount0, amount1] = await api.call({
-    abi: "function previewRedeem(uint256 shares) view returns (uint256 amount0, uint256 amount1)",
+  const [vltAmount, usdcAmount] = await api.call({
+    abi: "function previewRedeem(uint256 shares) view returns (uint256 vltAmount, uint256 usdcAmount)",
     target: vaultAddr,
     params: [supply],
   });
-  api.add(vlt, amount0);
-  api.add(usdc, amount1);
+  api.add(vlt, vltAmount);
+  api.add(usdc, usdcAmount);
   await api.sumTokens({ owner: vaultAddr, tokens: [vlt, usdc] });
 
   const prices = await usdPrices([vlt, usdc]);
@@ -80,7 +80,7 @@ async function main() {
   console.log(`\nFees over blocks ${fromBlock}..${latest}: ${compounds.length} Compound, ${retained.length} FeesRetained`);
   // Invariant the adapter's supply-side math relies on: finder cut == fee / 100 (1%).
   for (const c of compounds) {
-    if (c.finder0 !== c.fee0 / 100n || c.finder1 !== c.fee1 / 100n) {
+    if (c.vltFinder !== c.vltFees / 100n || c.usdcFinder !== c.usdcFees / 100n) {
       throw new Error(`finder != fee/100 in tx ${c._txHash} — adapter assumption broken`);
     }
   }

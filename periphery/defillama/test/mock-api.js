@@ -61,7 +61,7 @@ function createBalancesFactory() {
 }
 
 // FetchOptions shim: getLogs decodes with the event ABI and returns objects whose named
-// fields work like upstream (log.fee0, log.finder0, ...), each a BigInt.
+// fields work like upstream (log.vltFees, log.vltFinder, ...), each a BigInt.
 function makeFetchOptions(provider, { fromBlock, toBlock }) {
   return {
     createBalances: createBalancesFactory(),

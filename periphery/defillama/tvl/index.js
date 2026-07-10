@@ -16,15 +16,15 @@ const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"; // currency1, 6 decim
 
 async function tvl(api) {
   // 1. Principal held as V4 position liquidity, valued in-kind by the vault's own preview.
-  //    previewRedeem(totalSupply()) returns (amount0 = VLT, amount1 = USDC) raw; (0, 0) pre-seed.
+  //    previewRedeem(totalSupply()) returns token-named (vltAmount, usdcAmount) raw; (0, 0) pre-seed.
   const supply = await api.call({ abi: "uint256:totalSupply", target: VAULT });
-  const [amount0, amount1] = await api.call({
-    abi: "function previewRedeem(uint256 shares) view returns (uint256 amount0, uint256 amount1)",
+  const [vltAmount, usdcAmount] = await api.call({
+    abi: "function previewRedeem(uint256 shares) view returns (uint256 vltAmount, uint256 usdcAmount)",
     target: VAULT,
     params: [supply],
   });
-  api.add(VLT, amount0);
-  api.add(USDC, amount1);
+  api.add(VLT, vltAmount);
+  api.add(USDC, usdcAmount);
 
   // 2. Retained fees + compound dust sitting as plain ERC-20 balances on the vault.
   await api.sumTokens({ owner: VAULT, tokens: [VLT, USDC] });

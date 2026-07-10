@@ -17,8 +17,8 @@ vault is deployed.
 - **TVL** = `vault.previewRedeem(vault.totalSupply())` (the VLT + USDC principal backing all
   shares) **+** the vault's ERC-20 balances of both tokens (fees retained awaiting compound).
   Pure view calls — no events, no indexing.
-- **Fees** (from events alone): realized pool fees = Σ `Compound.fee0/fee1` + Σ `FeesRetained.fee0/fee1`.
-- **SupplySideRevenue** = fees − Σ `Compound.finder0/finder1` (the 1% permissionless-keeper cut).
+- **Fees** (from events alone): realized pool fees = Σ `Compound.vltFees/usdcFees` + Σ `FeesRetained.vltFees/usdcFees`.
+- **SupplySideRevenue** = fees − Σ `Compound.vltFinder/usdcFinder` (the 1% permissionless-keeper cut).
 - **Revenue / ProtocolRevenue** = 0 — the vault is ownerless with no fee switch.
 - Token ordering everywhere: `*0` = VLT (18 decimals), `*1` = USDC (6 decimals)
   (VLT `0x6b78…` < USDC `0xa0b8…` ⇒ VLT is currency0).

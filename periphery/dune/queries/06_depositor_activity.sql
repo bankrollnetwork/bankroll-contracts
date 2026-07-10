@@ -1,15 +1,16 @@
 -- vltUSDC · 06 — depositor activity & flows
 -- Daily deposit/redeem counts, USD volumes, unique + cumulative-new users, and net flow.
--- CAVEAT (event semantics): Deposit.vltIn/usdcIn are the GROSS amounts pulled BEFORE the
--- vault refunds unused dust, so deposit volume is slightly overstated (typically <2% zap
--- dust); Redeem.amount0Out/amount1Out are exact. Net flow is therefore an upper bound.
--- NOTE on `user`: for zap deposits the vault's msg.sender is the ZapHelper contract, so
--- Deposit.user = the helper, not the end wallet. Split direct-vs-zap flow by comparing user
--- to the ZapHelper address; attribute zapped end-wallets via the tx sender if needed.
+-- Event semantics: Deposit.vltUsed/usdcUsed are the amounts the pool actually CONSUMED
+-- (post-refund) and Redeem.vltOut/usdcOut are exact, so volumes and net flow here are
+-- exact — no dust caveat. All vault event amounts are token-named (vlt* 18d / usdc* 6d);
+-- no currency0/1 mapping is ever needed.
+-- Attribution: Deposit.recipient is the SHARE OWNER (zaps included — the vault mints
+-- straight to the end wallet); Deposit.sender is the payer, so sender != recipient flags a
+-- zapped/on-behalf entry. Redeem.owner is whose shares burned (receiver only got the tokens).
 -- Tables: vltusdc_ethereum.VltUsdcVault_evt_{Deposit,Redeem} (namespace: find-replace if
 --   different), uniswap_v4_ethereum.PoolManager_evt_{Initialize,Swap} (price).
 -- Params: {{vault_address}} (text, 0x-prefixed).
--- Pre-decoding fallback: ethereum.logs with topic0 Deposit 0x9cd8ced6…, Redeem 0xbd5034ff…
+-- Pre-decoding fallback: ethereum.logs with topic0 Deposit 0xae7fb4f0…, Redeem 0x215abfcd…
 --   (full table in ../README.md).
 
 WITH params AS (
@@ -32,16 +33,16 @@ price_daily AS (
   GROUP BY 1
 ),
 deposits AS (
-  SELECT CAST(evt_block_time AS DATE) AS day, "user",
-         CAST("vltIn" AS DOUBLE) / 1e18 AS vlt_in,
-         CAST("usdcIn" AS DOUBLE) / 1e6 AS usdc_in
+  SELECT CAST(evt_block_time AS DATE) AS day, "recipient" AS "user",
+         CAST("vltUsed" AS DOUBLE) / 1e18 AS vlt_in,
+         CAST("usdcUsed" AS DOUBLE) / 1e6 AS usdc_in
   FROM vltusdc_ethereum.VltUsdcVault_evt_Deposit, params
   WHERE contract_address = params.vault
 ),
 redeems AS (
-  SELECT CAST(evt_block_time AS DATE) AS day, "user",
-         CAST("amount0Out" AS DOUBLE) / 1e18 AS vlt_out,   -- amount0 = VLT (currency0)
-         CAST("amount1Out" AS DOUBLE) / 1e6  AS usdc_out   -- amount1 = USDC (currency1)
+  SELECT CAST(evt_block_time AS DATE) AS day, "owner" AS "user",
+         CAST("vltOut" AS DOUBLE) / 1e18 AS vlt_out,
+         CAST("usdcOut" AS DOUBLE) / 1e6 AS usdc_out
   FROM vltusdc_ethereum.VltUsdcVault_evt_Redeem, params
   WHERE contract_address = params.vault
 ),
@@ -72,7 +73,7 @@ SELECT
   COALESCE(d.depositors, 0)    AS depositors,
   COALESCE(r.redeem_count, 0)  AS redeem_count,
   COALESCE(r.redeemers, 0)     AS redeemers,
-  COALESCE(d.vlt_in, 0) * p.usdc_per_vlt + COALESCE(d.usdc_in, 0)   AS deposit_usd_gross,
+  COALESCE(d.vlt_in, 0) * p.usdc_per_vlt + COALESCE(d.usdc_in, 0)   AS deposit_usd,
   COALESCE(r.vlt_out, 0) * p.usdc_per_vlt + COALESCE(r.usdc_out, 0) AS redeem_usd,
   (COALESCE(d.vlt_in, 0) - COALESCE(r.vlt_out, 0)) * p.usdc_per_vlt
     + COALESCE(d.usdc_in, 0) - COALESCE(r.usdc_out, 0)              AS net_flow_usd,

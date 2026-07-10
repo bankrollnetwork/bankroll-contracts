@@ -1,8 +1,8 @@
 # vltUSDC — Dune dashboard
 
-Eight DuneSQL queries forming a complete vltUSDC dashboard: fees, TVL, share metrics / fee
-APR, keeper economics, depositor activity, holders, and pool price/volume. Written **before**
-mainnet deployment — see the fill-in checklist at the bottom.
+Nine DuneSQL queries forming a complete vltUSDC dashboard: fees, TVL, share metrics / fee
+APR, keeper economics, depositor activity, holders, pool price/volume, and per-wallet PnL.
+Written **before** mainnet deployment — see the fill-in checklist at the bottom.
 
 ## Queries
 
@@ -16,6 +16,7 @@ mainnet deployment — see the fill-in checklist at the bottom.
 | `06_depositor_activity.sql` | Daily deposits/redeems, USD flows, unique + cumulative users | **Yes** |
 | `07_holders.sql` | Holder count + top-20 with % of supply | No |
 | `08_vlt_price_volume.sql` | VLT price (from the pool itself) + daily volume | No |
+| `09_wallet_pnl.sql` | Per-wallet realized + unrealized PnL, avg cost, ROI (lifetime-average-cost method) | **Yes** |
 
 Half the dashboard (01, 03, 04, 07, 08) runs **day one** after deploy — it needs only the
 already-decoded `uniswap_v4_ethereum.PoolManager_evt_*` and `erc20_ethereum.evt_Transfer`
@@ -30,6 +31,8 @@ tables. The other half needs the vault ABI decoded (below), or the raw-log fallb
 - **Row 3:** L/share + APR lines (04) · price/volume combo (08).
 - **Row 4:** keeper economics table + leaderboard (05).
 - **Row 5:** deposits/redeems + cumulative users (06) · top holders table (07).
+- **Row 6:** per-wallet PnL leaderboard (09) — realized/unrealized/ROI; conventions in the
+  query header (transfers marked at day NAV; zap basis measured at the vault boundary).
 
 ## Setup after mainnet deploy
 
@@ -64,21 +67,31 @@ verified July 2026):
 
 | Event | topic0 |
 |---|---|
-| `Deposit(address,uint256,uint256,uint256,uint128)` | `0x9cd8ced6480eb3fbc8c1110cbd3e34bd49019b580a57cf1e3a51640acd592ec9` |
-| `Redeem(address,uint256,uint256,uint256)` | `0xbd5034ffbd47e4e72a94baa2cdb74c6fad73cb3bcdc13036b72ec8306f5a7646` |
+| `Deposit(address,address,uint256,uint256,uint256,uint128)` | `0xae7fb4f08b2f9b0c34cf99a752feb677ea4eb2b29781cc02ba76a45ecb7d26b6` |
+| `Redeem(address,address,uint256,uint256,uint256)` | `0x215abfcd108b85fbee47f26fda2de66f90f14fa5fcaf0201698ad8ac9323545f` |
 | `Compound(address,uint256,uint256,uint256,uint256,uint128)` | `0xb824c165a8c590db06a9880ff2259a602e9057773daddafef70a6c1a93401b9b` |
 | `FeesRetained(uint256,uint256)` | `0xbc53b087a813a8221528ece92a23d8e12b158c878f9062d121c7656fdc0a5dc2` |
 
 Non-indexed args live ABI-packed in `data` (32 bytes each, in declaration order); e.g. for
-`FeesRetained`: `fee0 = varbinary_to_uint256(substr(data, 1, 32))`,
-`fee1 = varbinary_to_uint256(substr(data, 33, 32))`. `Compound.finder` is `topic1`
-(right-most 20 bytes) and its `data` holds `fee0, fee1, finder0, finder1, liquidityAdded`.
+`FeesRetained`: `vltFees = varbinary_to_uint256(substr(data, 1, 32))`,
+`usdcFees = varbinary_to_uint256(substr(data, 33, 32))`. `Compound.finder` is `topic1`
+(right-most 20 bytes) and its `data` holds `vltFees, usdcFees, vltFinder, usdcFinder,
+liquidityAdded`. `Deposit` indexes `sender` (topic1) and `recipient` (topic2), with
+`vltUsed, usdcUsed, sharesOut, liquidityAdded` in `data`; `Redeem` indexes `owner` (topic1)
+and `receiver` (topic2), with `sharesIn, vltOut, usdcOut` in `data`.
 
 ## Semantics worth remembering (baked into the query comments too)
 
-- Token ordering: `*0` = VLT (18d), `*1` = USDC (6d) everywhere.
-- `Deposit.vltIn/usdcIn` are **gross pre-refund** — deposit volume is an upper bound; use
-  `liquidityAdded` / PoolManager `ModifyLiquidity` for exact position accounting.
+- ALL vault event/view amounts are **token-named**: `vlt*` is always VLT (18d), `usdc*`
+  always USDC (6d) — the vault maps its internal currency0/1 ordering away, so no
+  `usdcIsCurrency0` join is ever needed. Only raw `PoolManager` data (`Swap.amount0/1`,
+  `ModifyLiquidity`) is still pool-ordered: there, currency0 = VLT on mainnet
+  (`0x6b78…` sorts below `0xa0b8…`).
+- `Deposit.vltUsed/usdcUsed` are the amounts the pool **actually consumed** (post-refund) —
+  deposit volume and per-wallet cost basis are exact from the event alone.
+- Per-wallet attribution: `Deposit.recipient` / `Redeem.owner` are the share owner — zaps
+  included, since the vault mints straight to the end wallet. `Deposit.sender != recipient`
+  flags a zapped/on-behalf entry; `Redeem.receiver` is a payout destination only.
 - Shares have `decimals() == 0` (raw L units): report % of supply, not raw counts.
 - Position L on Dune = cumulative `liquidityDelta` from `ModifyLiquidity` where
   `sender = vault` — this exactly matches `positionLiquidity()` (redeems included).

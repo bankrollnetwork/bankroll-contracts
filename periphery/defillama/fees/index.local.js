@@ -3,8 +3,8 @@
 // Parameterized on addresses (unlike the submission copy) so the harness can target a fork deploy.
 
 const COMPOUND_EVT =
-  "event Compound(address indexed finder, uint256 fee0, uint256 fee1, uint256 finder0, uint256 finder1, uint128 liquidityAdded)";
-const FEES_RETAINED_EVT = "event FeesRetained(uint256 fee0, uint256 fee1)";
+  "event Compound(address indexed finder, uint256 vltFees, uint256 usdcFees, uint256 vltFinder, uint256 usdcFinder, uint128 liquidityAdded)";
+const FEES_RETAINED_EVT = "event FeesRetained(uint256 vltFees, uint256 usdcFees)";
 
 // Returns an async (options) => dimensions function, same shape as the upstream adapter's fetch.
 function makeFetch({ vault, vlt, usdc }) {
@@ -18,17 +18,17 @@ function makeFetch({ vault, vlt, usdc }) {
     const retained = await options.getLogs({ target: vault, eventAbi: FEES_RETAINED_EVT });
 
     compounds.forEach((log) => {
-      dailyFees.add(vlt, log.fee0);
-      dailyFees.add(usdc, log.fee1);
-      dailySupplySideRevenue.add(vlt, log.fee0 - log.finder0);
-      dailySupplySideRevenue.add(usdc, log.fee1 - log.finder1);
+      dailyFees.add(vlt, log.vltFees);
+      dailyFees.add(usdc, log.usdcFees);
+      dailySupplySideRevenue.add(vlt, log.vltFees - log.vltFinder);
+      dailySupplySideRevenue.add(usdc, log.usdcFees - log.usdcFinder);
     });
 
     retained.forEach((log) => {
-      dailyFees.add(vlt, log.fee0);
-      dailyFees.add(usdc, log.fee1);
-      dailySupplySideRevenue.add(vlt, log.fee0);
-      dailySupplySideRevenue.add(usdc, log.fee1);
+      dailyFees.add(vlt, log.vltFees);
+      dailyFees.add(usdc, log.usdcFees);
+      dailySupplySideRevenue.add(vlt, log.vltFees);
+      dailySupplySideRevenue.add(usdc, log.usdcFees);
     });
 
     return { dailyFees, dailyRevenue, dailyProtocolRevenue, dailySupplySideRevenue, _raw: { compounds, retained } };
