@@ -47,7 +47,7 @@ shares are denominated in pool **liquidity (L)** rather than dollars. It is **fu
 ownerless**: no admin, no pause, no upgrade path, no privileged parameter, no sweep. The
 three entrypoints (`deposit`, `redeem`, `compound`) are permissionless and `nonReentrant`;
 the only external dependency in the critical path is the canonical V4 `PoolManager`, with
-hooks explicitly disallowed at construction (`VltUsdcVault.sol:222`). `ZapHelper` is a
+hooks explicitly disallowed at construction (`VltUsdcVault.sol:244`). `ZapHelper` is a
 stateless, ownerless periphery contract that converts USDC-only deposits into the balanced
 pair via one immutable whitelisted router; a fault in it cannot affect vault solvency.
 
@@ -117,7 +117,7 @@ Out of scope: `@uniswap/v4-core`, `@uniswap/v4-periphery`, `@openzeppelin/contra
 | Any user | `deposit`, `redeem`, `compound`, ERC-20 share ops | No privileged role exists anywhere |
 | Keeper / finder | `compound()` for a 1% in-kind cut of freshly harvested pool fees | Permissionless, competitive |
 | ZapHelper (or any zapper) | Ordinary caller of `deposit` | Vault has no knowledge of it |
-| Uniswap V4 PoolManager | Sole external dependency; calls back `unlockCallback` | Callback gated to `msg.sender == poolManager` (`VltUsdcVault.sol:541`) |
+| Uniswap V4 PoolManager | Sole external dependency; calls back `unlockCallback` | Callback gated to `msg.sender == poolManager` (`VltUsdcVault.sol:583-584`) |
 | Deployer | Constructor parameters only | Zero post-deploy privileges |
 
 **Mutable state** on the otherwise-immutable vault is limited to: OZ ERC-20 share
@@ -129,22 +129,22 @@ key could touch because there is no admin key.
 
 1. **Solvency by construction** — shares are a pro-rata claim on position liquidity;
    `redeem` removes exactly `floor(L·shares/supply)` and returns both tokens in-kind
-   (`VltUsdcVault.sol:428`). The vault never owes more L than the position holds.
+   (`VltUsdcVault.sol:470`). The vault never owes more L than the position holds.
 2. **Share supply changes only in `deposit`/`redeem`** — `compound()` mints no shares, so
-   L/share is monotonically non-decreasing across compounds (`VltUsdcVault.sol:719`).
+   L/share is monotonically non-decreasing across compounds (`VltUsdcVault.sol:765-766`).
 3. **Uncompounded pool fees always accrue to all holders** — every `modifyLiquidity` path
    splits `feesAccrued` out of `callerDelta` and retains it at the vault
-   (`VltUsdcVault.sol:577-602, 639-658`); only `compound()` pays any fee out (the 1%). See
+   (`VltUsdcVault.sol:620-646, 692-704`); only `compound()` pays any fee out (the 1%). See
    I-10 for the one bounded exception this creates for a joining depositor.
 4. **Every unlock nets its deltas to zero** — otherwise the PoolManager reverts
    `CurrencyNotSettled`; all passing flow tests prove this transitively.
 5. **`MINIMUM_LIQUIDITY` (1,000 L) is locked at `0xdead` forever** on first deposit
-   (`VltUsdcVault.sol:390-391`).
+   (`VltUsdcVault.sol:421-422`).
 
 **Token assumptions:** both pool tokens must be non-hooked, non-fee-on-transfer,
 non-rebasing ERC-20s. Verified true for VLT (§1). USDC satisfies this today but is an
 upgradeable proxy with a blacklist (see I-06); the blacklist case is handled and documented
-in-code (`VltUsdcVault.sol:411-414`).
+in-code (`VltUsdcVault.sol:443-447`).
 
 ---
 
@@ -152,8 +152,8 @@ in-code (`VltUsdcVault.sol:411-414`).
 
 ### L-01 — `compound()` values and rebalances at manipulable spot price; "never loses" is a bounded-loss claim, not an absolute one
 
-**Location:** `VltUsdcVault.sol:276-301` (`compoundClaimable`), `783-826` (`_rebalance`),
-`89-111` (limit + cap constants)
+**Location:** `VltUsdcVault.sol:298-323` (`compoundClaimable`), `846-893` (`_rebalance`),
+`93-111` (limit + cap constants)
 
 `compound()` gates on a USDC valuation of claimable assets taken from the pool's current
 `sqrtPriceX96`, and `_rebalance` sizes and executes its internal swap against that same
@@ -194,7 +194,7 @@ fees: a one-sided donation alone is never swapped."
 
 ### L-02 — `zap()` sends the unspent-input refund to `recipient`, not to the caller
 
-**Location:** `ZapHelper.sol:130-142` (`zap`); pre-fix the refund `_sweep` sent unspent `tokenIn` to `recipient` (now `msg.sender`, line 141)
+**Location:** `ZapHelper.sol:138-150` (`zap`); pre-fix the refund `_sweep` sent unspent `tokenIn` to `recipient` (now `msg.sender`, line 141)
 
 `zap(tokenIn, tokenOut, amountIn, minOut, recipient, swapData)` pulls `amountIn` from
 `msg.sender`, but if the route under-consumes its input, the leftover `tokenIn` is swept to
@@ -216,7 +216,7 @@ the recipient."
 
 ### L-03 — No deadline parameter on `deposit` / `zapDeposit`
 
-**Location:** `VltUsdcVault.sol:349-356` (`deposit`), `ZapHelper.sol:89-95` (`zapDeposit`)
+**Location:** `VltUsdcVault.sol:377-391` (`deposit`), `ZapHelper.sol:96-108` (`zapDeposit`)
 
 Neither the vault's `deposit` nor the helper's `zapDeposit` accepts a `deadline`. A
 transaction that lingers in the mempool (low gas, congestion) can execute much later under
@@ -245,9 +245,9 @@ reverts before the swap leg runs."
 
 ### I-01 — `compound()` reverts instead of no-opping if ≥ $1 is donated to the vault before the first deposit
 
-`compoundClaimable()` counts vault-held balances (`VltUsdcVault.sol:294-295`), so a ≥$1
+`compoundClaimable()` counts vault-held balances (`VltUsdcVault.sol:316-317`), so a ≥$1
 donation made **before any deposit exists** passes the gate, and `_onCompound`'s
-fee-collect poke (`modifyLiquidity` with `liquidityDelta == 0`, `VltUsdcVault.sol:669-673`)
+fee-collect poke (`modifyLiquidity` with `liquidityDelta == 0`, `VltUsdcVault.sol:716-721`)
 then reverts inside V4 (`CannotUpdateEmptyPosition` — a poke requires an existing
 position). Nothing is stuck or lost — `compound()` simply reverts until the first deposit
 creates the position, after which the donation folds into the next compound as designed.
@@ -256,8 +256,8 @@ Self-healing; noted for completeness.
 ### I-02 — Permit2 branch of `_execRoute` does not reset the residual ERC-20 approval
 
 `_execRoute` resets the router allowance to 0 after the route in the plain-allowance branch
-(`ZapHelper.sol:178`) but the Permit2 branch leaves the helper→Permit2 ERC-20 allowance at
-whatever the route did not consume (`ZapHelper.sol:153-156`). This is benign in the current
+(`ZapHelper.sol:186`) but the Permit2 branch leaves the helper→Permit2 ERC-20 allowance at
+whatever the route did not consume (`ZapHelper.sol:149`). This is benign in the current
 design: the helper holds no balances between calls (everything is swept), and the Permit2
 sub-approval (router as spender) expires after 60 seconds. Asymmetric hygiene only; reset
 both branches for uniformity if touched again.
@@ -265,14 +265,14 @@ both branches for uniformity if touched again.
 ### I-03 — Any tokens resting in `ZapHelper` are claimable by the first caller (by design)
 
 `zap()`/`zapDeposit()` measure and sweep the helper's **entire** balance of the involved
-tokens (`ZapHelper.sol:111, 122-123, 141, 182-185`). Tokens accidentally transferred
+tokens (`ZapHelper.sol:111, 130-131, 149, 190-193`). Tokens accidentally transferred
 directly to the helper are therefore collectable by anyone who calls `zap` next. This is
 the intended "stateless, no custody" model and cannot touch user or vault funds, but it is
 worth stating in user-facing docs: **never send tokens directly to the ZapHelper address.**
 
 ### I-04 — Vault shares report `decimals() == 0`
 
-`VltUsdcVault.sol:251-253`. Intentional (shares are raw integer L units), and correct in
+`VltUsdcVault.sol:273-275`. Intentional (shares are raw integer L units), and correct in
 that mint/burn/transfer semantics are unchanged. Expect cosmetic quirks in integrations
 that assume 18 decimals (some DEX UIs, portfolio trackers, `permit`-less approvals with
 "unlimited" shortcuts). Purely a display/integration consideration.
@@ -285,7 +285,7 @@ informational-only and touches no accounting; acceptable, noted for the record.
 ### I-06 — External-token trust assumptions (USDC upgradeability & blacklist)
 
 The vault hardcodes correct behavior for today's USDC (6 decimals, blacklist handled at
-`VltUsdcVault.sol:411-414`: a blacklisted redeemer's whole `redeem` reverts, harming only
+`VltUsdcVault.sol:443-447`: a blacklisted redeemer's whole `redeem` reverts, harming only
 themselves). Residual risks outside the vault's control: USDC is an upgradeable proxy
 (Circle could in principle add hooks/fees, violating the vault's token assumptions), and a
 **blacklisted vault address** — however unlikely — would freeze the USDC leg of every
@@ -295,7 +295,7 @@ risk (immutable token, §1).
 
 ### I-07 — Finder-fee base excludes retained balances: keeper incentive can lag the gate
 
-Conscious design (documented at `VltUsdcVault.sol:686-690` and in the README): the 1%
+Conscious design (documented at `VltUsdcVault.sol:727-730` and in the README): the 1%
 bounty is computed only on **freshly harvested pool fees**, while retained
 deposit/redeem-harvested fees and dust reinvest with no bounty. Consequence: the $1 gate
 can be satisfied almost entirely by retained balances while the bounty is near zero, so no
@@ -322,17 +322,17 @@ pins the actual install, but for an audited artifact the convention is exact ver
 ### I-10 — A joining depositor's share price ignores retained/pending fees (bounded JIT-yield capture)
 
 *Surfaced by the July 9 adversarial re-audit.* Shares are priced purely on position
-liquidity: `shares = supply * liquidityAdded / liqBefore` (`VltUsdcVault.sol:398`), with
-`liqBefore` snapshotted before the unlock (`:371`). The vault's **off-position** value — prior
+liquidity: `shares = supply * liquidityAdded / liqBefore` (`VltUsdcVault.sol:429`), with
+`liqBefore` snapshotted before the unlock (`:401`). The vault's **off-position** value — prior
 compound dust, redeem-retained fees, and the position's pending pool fees that `_onDeposit`
-harvests into the retained balance *during this very deposit* (`:577-602`) — is deliberately
+harvests into the retained balance *during this very deposit* (`:620-646`) — is deliberately
 excluded from that price. This exclusion is exactly what defeats donation inflation (pricing
 on token balances would reopen it, see §7), so it is a **deliberate trade-off, not a coding
 error**. The side effect: a new depositor pays nothing for the retained/pending value yet, by
 becoming a holder, gains a pro-rata claim on it; when a later `compound()` folds that value
 into L, the joiner captures their fraction of value that accrued entirely before they joined,
 diluting prior holders by the same amount. `redeem()` is asymmetric in the holder-favoring
-direction (a leaver forfeits pending fees, `:639-658`), so the only extractable direction is
+direction (a leaver forfeits pending fees, `:692-704`), so the only extractable direction is
 deposit-then-hold-through-a-compound — classic JIT yield capture, not an atomic round-trip.
 
 **Why informational, not a vulnerability:** the transferable amount is bounded by the
@@ -371,7 +371,7 @@ the trade-off is explicitly re-confirmed.
 Each of the classic vault attack classes was checked explicitly:
 
 **First-depositor share inflation — mitigated.** First deposit requires
-`liquidityAdded > 1_000` and locks 1,000 shares at `0xdead` (`VltUsdcVault.sol:390-396`).
+`liquidityAdded > 1_000` and locks 1,000 shares at `0xdead` (`VltUsdcVault.sol:419-426`).
 Because shares are L-denominated and L/share can only be inflated by *donating value that
 compounds to all holders*, the attacker's inflation spend is recouped only pro-rata to
 their own holding; quantitatively, making a victim's worst-case rounding loss reach even
@@ -379,29 +379,29 @@ $100 requires donating ≥ $100 × totalSupply-in-shares — astronomically unpr
 `minShares` independently reverts a rounded-to-zero mint.
 
 **Direct-donation inflation — mitigated.** Shares are minted pro-rata to **ΔL reported by
-the PoolManager** (`VltUsdcVault.sol:398`), never to token balances; donated tokens are
-snapshotted as `retain0/1` *before* the deposit transfer (`VltUsdcVault.sol:365-366`) and
+the PoolManager** (`VltUsdcVault.sol:429`), never to token balances; donated tokens are
+snapshotted as `retain0/1` *before* the deposit transfer (`VltUsdcVault.sol:395-396`) and
 excluded from the depositor's add, folding forward to all holders. (This ΔL-only pricing has
 one bounded side effect — a joining depositor's pro-rata claim on *pre-existing* retained/
 pending fees — analyzed as informational finding I-10.)
 
 **V4 fee-sweep ("BUG-1") — correctly fixed in all three paths.** V4 folds a position's
 full accrued fees into `callerDelta` on *any* `modifyLiquidity`. `_onDeposit` harvests fees
-to the vault before the depositor's add (`VltUsdcVault.sol:577-602`); `_onRedeem` pays the
+to the vault before the depositor's add (`VltUsdcVault.sol:620-646`); `_onRedeem` pays the
 redeemer `callerDelta − feesAccrued` and takes the fees to the vault
-(`VltUsdcVault.sol:639-658`); `_onCompound` is the only fee-payout path (1% of the fresh
+(`VltUsdcVault.sol:692-704`); `_onCompound` is the only fee-payout path (1% of the fresh
 harvest). `test/vault.fees.test.js` covers all three.
 
 **Delta settlement — nets to zero on every path.** Adds settle negative deltas
-(`sync → transfer → settle`, `VltUsdcVault.sol:858-866`), removes/harvests `take` positive
+(`sync → transfer → settle`, `VltUsdcVault.sol:921-928`), removes/harvests `take` positive
 deltas in full, and the swap settles only the input actually consumed under a partial fill
-(`VltUsdcVault.sol:832-855`). Any residual would revert the whole unlock
+(`VltUsdcVault.sol:895-919`). Any residual would revert the whole unlock
 (`CurrencyNotSettled`), which the passing flow tests exclude.
 
 **Reentrancy — guarded and structurally limited.** All three entrypoints are
-`nonReentrant`; the unlock callback accepts only the PoolManager (`VltUsdcVault.sol:541`);
+`nonReentrant`; the unlock callback accepts only the PoolManager (`VltUsdcVault.sol:583-584`);
 the pool tokens have no transfer hooks (§1); the finder payout is last, after all pool
-effects (`VltUsdcVault.sol:730-733`). The suite's `ReentrantToken` probe asserts reentry
+effects (`VltUsdcVault.sol:776-779`). The suite's `ReentrantToken` probe asserts reentry
 reverts with `ReentrancyGuardReentrantCall`.
 
 **Redeem sandwiching — not value-extractable.** Redemption is strictly in-kind and
@@ -410,7 +410,7 @@ displaced price is worth more, not less, at the true price. The absence of min-o
 on `redeem` is therefore sound (and keeps exit ungrieffable).
 
 **Rounding directions — consistently favor the vault/holders.** Deposit shares floor
-(`:398`), redeem liquidity floors (`:428`), V4 rounds removal amounts down, the
+(`:429`), redeem liquidity floors (`:470`), V4 rounds removal amounts down, the
 `uint128` downcast in `redeem` is bounded by the position's own `uint128` liquidity, the
 sqrt-space 5% limit constants round inward (9747² = 0.95004, 10246² = 1.04980), and
 `_liquidityForAmounts` takes the min of the two single-sided computations so an add can
@@ -418,7 +418,7 @@ never demand more than the vault holds.
 
 **Access control — nothing to protect.** There are no privileged functions; the
 constructor enforces `hooks == address(0)` and canonical token ordering
-(`VltUsdcVault.sol:222-223`), eliminating the hook-based attack surface entirely.
+(`VltUsdcVault.sol:237-244`), eliminating the hook-based attack surface entirely.
 
 ---
 
