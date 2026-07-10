@@ -23,6 +23,10 @@ const DEFAULTS = {
   usdcPerVlt: 2, // initial pool price: 2 USDC per 1 VLT
   baseLiquidity: 10n ** 16n, // baseline LP depth seeded by an external LP
   reentrantToken: false, // use ReentrantToken in place of VLT (reentrancy test)
+  // Force which token sorts as currency0 (mock addresses are nonce-dependent, so ordering is
+  // otherwise a coin flip per run context). Set true/false for the token-naming mapping tests;
+  // undefined = take whatever ordering the deploy produced.
+  forceUsdcIsCurrency0: undefined,
 };
 
 function sortTokens(a, b) {
@@ -46,13 +50,22 @@ async function deployVaultFixture(overrides = {}) {
   await usdc.waitForDeployment();
 
   let vlt;
-  if (cfg.reentrantToken) {
-    const Reentrant = await ethers.getContractFactory("ReentrantToken");
-    vlt = await Reentrant.deploy("Vault", "VLT", cfg.vltDecimals);
-  } else {
-    vlt = await Mock.deploy("Vault", "VLT", cfg.vltDecimals);
-  }
+  const VltFactory = cfg.reentrantToken
+    ? await ethers.getContractFactory("ReentrantToken")
+    : Mock;
+  vlt = await VltFactory.deploy("Vault", "VLT", cfg.vltDecimals);
   await vlt.waitForDeployment();
+
+  // Deterministic ordering on request: each redeploy takes a fresh (nonce-derived) address,
+  // so a few tries land on the requested side of USDC. Bounded to keep failure loud.
+  if (cfg.forceUsdcIsCurrency0 !== undefined) {
+    let tries = 0;
+    while ((BigInt(usdc.target) < BigInt(vlt.target)) !== cfg.forceUsdcIsCurrency0) {
+      if (++tries > 40) throw new Error("could not force currency ordering after 40 redeploys");
+      vlt = await VltFactory.deploy("Vault", "VLT", cfg.vltDecimals);
+      await vlt.waitForDeployment();
+    }
+  }
 
   // 3. Order currencies + build the PoolKey.
   const [c0, c1] = sortTokens(vlt, usdc);
@@ -186,11 +199,13 @@ async function deposit(ctx, user, usdcAmount, opts = {}) {
   await (await ctx.vlt.mint(user.address, vltAmt)).wait();
   await (await ctx.usdc.connect(user).approve(ctx.vault.target, ethers.MaxUint256)).wait();
   await (await ctx.vlt.connect(user).approve(ctx.vault.target, ethers.MaxUint256)).wait();
-  return ctx.vault.connect(user).deposit(vltAmt, usdcAmt, opts.minShares ?? 0n, opts.deadline ?? ethers.MaxUint256);
+  return ctx.vault
+    .connect(user)
+    .deposit(vltAmt, usdcAmt, opts.minShares ?? 0n, opts.deadline ?? ethers.MaxUint256, opts.recipient ?? user.address);
 }
 
 // Periphery path: deposit `usdcAmount` USDC through the ZapHelper (buys VLT externally, then
-// deposits the balanced pair into the vault and forwards shares to `user`).
+// deposits the balanced pair into the vault, which mints shares directly to the recipient).
 async function zapDeposit(ctx, user, usdcAmount, opts = {}) {
   const usdcAmt = BigInt(usdcAmount);
   const swapUsdcToVlt = opts.swapUsdcToVlt ?? quoteDepositSwap(usdcAmt, ctx.cfg.fee);
@@ -198,14 +213,17 @@ async function zapDeposit(ctx, user, usdcAmount, opts = {}) {
   const minShares = opts.minShares ?? 0n;
   const swapData = opts.swapData ?? buildZapData(ctx, swapUsdcToVlt);
   const deadline = opts.deadline ?? ethers.MaxUint256;
+  const recipient = opts.recipient ?? user.address;
   await (await ctx.usdc.mint(user.address, usdcAmt)).wait();
   await (await ctx.usdc.connect(user).approve(ctx.zapHelper.target, ethers.MaxUint256)).wait();
-  return ctx.zapHelper.connect(user).zapDeposit(usdcAmt, swapUsdcToVlt, minVltOut, minShares, deadline, swapData);
+  return ctx.zapHelper
+    .connect(user)
+    .zapDeposit(usdcAmt, swapUsdcToVlt, minVltOut, minShares, deadline, recipient, swapData);
 }
 
-// redeem() is now shares-only (in-kind, no slippage bounds).
-async function redeem(ctx, user, shares) {
-  return ctx.vault.connect(user).redeem(BigInt(shares));
+// redeem() takes shares + receiver (in-kind, no slippage bounds).
+async function redeem(ctx, user, shares, receiver) {
+  return ctx.vault.connect(user).redeem(BigInt(shares), receiver ?? user.address);
 }
 
 // compound() is now zero-arg: it auto-rebalances internally and no-ops below the min-value gate.

@@ -77,13 +77,44 @@ describe("scripts/lib/pool — on-chain reads + off-chain quoter", () => {
     expect(await ctx.vault.balanceOf(ctx.alice.address)).to.be.greaterThan(0n);
   });
 
+  it("zapDeposit mints shares DIRECTLY to `recipient` — no forwarding hop; dust to the caller", async () => {
+    const ctx = await loadFixture(mediumFixture);
+    const rc = await (
+      await zapDeposit(ctx, ctx.alice, USDC(10000), { recipient: ctx.bob.address })
+    ).wait();
+
+    // Shares land on the recipient in one hop: caller and helper never hold any.
+    expect(await ctx.vault.balanceOf(ctx.bob.address)).to.be.greaterThan(0n);
+    expect(await ctx.vault.balanceOf(ctx.alice.address)).to.equal(0n);
+    expect(await ctx.vault.balanceOf(ctx.zapHelper.target)).to.equal(0n);
+
+    // The vault's Deposit event attributes the zap to the end wallet, with the helper as payer.
+    const ev = ctx.vault.interface.parseLog(
+      rc.logs.find((l) => {
+        try {
+          return ctx.vault.interface.parseLog(l)?.name === "Deposit";
+        } catch {
+          return false;
+        }
+      })
+    );
+    expect(ev.args.sender).to.equal(ctx.zapHelper.target);
+    expect(ev.args.recipient).to.equal(ctx.bob.address);
+
+    // Dust (vault refund / swap residual) sweeps to the CALLER, who paid.
+    expect(await ctx.vlt.balanceOf(ctx.bob.address)).to.equal(0n);
+    expect(await ctx.usdc.balanceOf(ctx.bob.address)).to.equal(0n);
+  });
+
   it("zapDeposit rejects a bad split (swapUsdcToVlt >= usdcAmount)", async () => {
     const ctx = await loadFixture(mediumFixture);
     const usdcAmount = USDC(10000);
     await (await ctx.usdc.mint(ctx.alice.address, usdcAmount)).wait();
     await (await ctx.usdc.connect(ctx.alice).approve(ctx.zapHelper.target, ethers.MaxUint256)).wait();
     await expect(
-      ctx.zapHelper.connect(ctx.alice).zapDeposit(usdcAmount, usdcAmount, 0, 0, ethers.MaxUint256, "0x")
+      ctx.zapHelper
+        .connect(ctx.alice)
+        .zapDeposit(usdcAmount, usdcAmount, 0, 0, ethers.MaxUint256, ctx.alice.address, "0x")
     ).to.be.revertedWith("bad-split");
   });
 

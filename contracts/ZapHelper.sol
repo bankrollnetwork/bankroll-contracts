@@ -21,6 +21,7 @@ interface IZapHelper {
         uint256 minVltOut,
         uint256 minShares,
         uint256 deadline,
+        address recipient,
         bytes calldata swapData
     ) external returns (uint256 shares);
 }
@@ -32,9 +33,13 @@ interface IPermit2Approve {
 interface IVltUsdcVault {
     function vlt() external view returns (address);
     function usdc() external view returns (address);
-    function deposit(uint256 vltAmount, uint256 usdcAmount, uint256 minShares, uint256 deadline)
-        external
-        returns (uint256 shares);
+    function deposit(
+        uint256 vltAmount,
+        uint256 usdcAmount,
+        uint256 minShares,
+        uint256 deadline,
+        address recipient
+    ) external returns (uint256 shares);
 }
 
 /*//////////////////////////////////////////////////////////////////////////
@@ -48,8 +53,8 @@ interface IVltUsdcVault {
     `zapDeposit(USDC)`: pull USDC, buy VLT from its external market by EXECUTING an
     off-chain-computed route against one whitelisted router (Uniswap's Universal
     Router on mainnet) — the buy-pressure leg — then deposit the bought VLT plus the
-    remaining USDC into the vault and forward the minted shares (and any dust) to the
-    caller. `zap(...)` exposes the raw swap primitive.
+    remaining USDC into the vault, which mints shares directly to the recipient;
+    any dust returns to the caller. `zap(...)` exposes the raw swap primitive.
 
     Immutable router (+ optional Permit2) and immutable vault. No owner, no custody —
     holds tokens only transiently within a call.
@@ -82,16 +87,19 @@ contract ZapHelper is IZapHelper {
     }
 
     /// @notice Zap a USDC-only deposit into the vault: buy VLT for `swapUsdcToVlt` USDC via the
-    /// off-chain route, deposit (bought VLT + remaining USDC) into the vault, and forward the
-    /// minted shares — plus any vault-refunded dust — to the caller. Reverts after `deadline`
-    /// (checked here BEFORE the swap leg, and again by the vault) so a stale mempool transaction
-    /// cannot execute an old route under moved market terms.
+    /// off-chain route, then deposit (bought VLT + remaining USDC) into the vault. The vault mints
+    /// shares DIRECTLY to `recipient` (and attributes its Deposit event to them — per-wallet PnL
+    /// tracking needs no transfer-join); leftover dust (vault refund / swap residual) goes to the
+    /// caller, who paid. Reverts after `deadline` (checked here BEFORE the swap leg, and again by
+    /// the vault) so a stale mempool transaction cannot execute an old route under moved market
+    /// terms.
     function zapDeposit(
         uint256 usdcAmount,
         uint256 swapUsdcToVlt,
         uint256 minVltOut,
         uint256 minShares,
         uint256 deadline,
+        address recipient,
         bytes calldata swapData
     ) external returns (uint256 shares) {
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
@@ -110,15 +118,15 @@ contract ZapHelper is IZapHelper {
         // refunding it, and mirrors the VLT side (vltOut is itself a measured balance delta).
         uint256 usdcForLp = IERC20(usdc).balanceOf(address(this));
 
-        // Deposit the balanced pair; the vault mints shares to this helper and refunds add-dust here.
+        // Deposit the balanced pair; the vault mints shares straight to `recipient` and refunds
+        // add-dust here (this helper is the payer).
         IERC20(vlt).forceApprove(vault, vltOut);
         IERC20(usdc).forceApprove(vault, usdcForLp);
-        shares = IVltUsdcVault(vault).deposit(vltOut, usdcForLp, minShares, deadline);
+        shares = IVltUsdcVault(vault).deposit(vltOut, usdcForLp, minShares, deadline, recipient);
         IERC20(vlt).forceApprove(vault, 0);
         IERC20(usdc).forceApprove(vault, 0);
 
-        // Forward shares + any leftover (vault refund / swap residual) to the caller.
-        IERC20(vault).safeTransfer(msg.sender, shares);
+        // Any leftover (vault refund / swap residual) back to the caller.
         _sweep(vlt, msg.sender);
         _sweep(usdc, msg.sender);
     }

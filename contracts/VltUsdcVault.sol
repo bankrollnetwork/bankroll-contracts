@@ -166,13 +166,13 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     }
 
     struct DepositData {
-        address user;
+        address payer;            // refund destination for unused contribution (always msg.sender)
         uint256 retain0;          // vault currency0 balance to KEEP (pre-existing fees/dust)
         uint256 retain1;          // vault currency1 balance to KEEP (pre-existing fees/dust)
     }
 
     struct RedeemData {
-        address user;
+        address receiver;         // destination for both redeemed tokens
         uint256 liquidity;        // liquidity (L) to remove — NOT share count
     }
 
@@ -184,28 +184,50 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                                   EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event Deposit(address indexed user, uint256 vltIn, uint256 usdcIn, uint256 sharesOut, uint128 liquidityAdded);
-    event Redeem(address indexed user, uint256 sharesIn, uint256 amount0Out, uint256 amount1Out);
+    /// @dev `vltUsed`/`usdcUsed` are the amounts the pool actually CONSUMED for the liquidity add
+    /// (settled to the PoolManager) — NOT the amounts pulled from the caller; any imbalanced excess
+    /// is refunded to the payer within the same call and never appears here. `recipient` is the
+    /// share owner (cost-basis attribution for per-wallet PnL); `sender` is the payer — for zaps
+    /// that is the ZapHelper, so sender != recipient distinguishes zapped entries from direct ones.
+    event Deposit(
+        address indexed sender,
+        address indexed recipient,
+        uint256 vltUsed,
+        uint256 usdcUsed,
+        uint256 sharesOut,
+        uint128 liquidityAdded
+    );
+    /// @dev `owner` is whose shares burned (PnL attribution); `receiver` is where both tokens went.
+    /// CONVENTION (all events + external views): amounts are named by TOKEN (`vlt*` 18d / `usdc*`
+    /// 6d), never by currency0/1 pool order — that ordering is an address-sort accident the
+    /// contract maps away internally (see `_toVltUsdc`), so consumers never need `usdcIsCurrency0`.
+    event Redeem(
+        address indexed owner,
+        address indexed receiver,
+        uint256 sharesIn,
+        uint256 vltOut,
+        uint256 usdcOut
+    );
 
-    /// @dev `fee0`/`fee1` are the FULL pool fees this compound freshly harvested (currency0/1 raw);
-    /// `finder0`/`finder1` are the 1% carved from them for the caller. Emitted so log-based fee
-    /// accounting (explorers, Dune, a DefiLlama fees adapter) can attribute realized pool fees
-    /// without view-call archaeology: total realized fees = Σ Compound(fee) + Σ FeesRetained(fee);
+    /// @dev `vltFees`/`usdcFees` are the FULL pool fees this compound freshly harvested (raw);
+    /// `vltFinder`/`usdcFinder` are the 1% carved from them for the caller. Emitted so log-based
+    /// fee accounting (explorers, Dune, a DefiLlama fees adapter) can attribute realized pool fees
+    /// without view-call archaeology: total realized fees = Σ Compound fees + Σ FeesRetained fees;
     /// supply-side share = that total minus Σ finder amounts.
     event Compound(
         address indexed finder,
-        uint256 fee0,
-        uint256 fee1,
-        uint256 finder0,
-        uint256 finder1,
+        uint256 vltFees,
+        uint256 usdcFees,
+        uint256 vltFinder,
+        uint256 usdcFinder,
         uint128 liquidityAdded
     );
 
     /// @dev Pool fees harvested and RETAINED at the vault for all holders when a deposit() or
     /// redeem() touches the position (V4 realizes accrued fees on ANY modifyLiquidity — the BUG-1
     /// split). Without this event those harvests are invisible in the logs, and event-based fee
-    /// accounting would systematically under-report between compounds. Amounts are currency0/1 raw.
-    event FeesRetained(uint256 fee0, uint256 fee1);
+    /// accounting would systematically under-report between compounds.
+    event FeesRetained(uint256 vltFees, uint256 usdcFees);
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -268,15 +290,15 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// pending uncompounded pool fees, per currency, valued in USDC at the spot price. compound()
     /// gates on `valueUsdc` (no-op below `MIN_COMPOUND_VALUE_USDC`); the UI shows the balance and uses
     /// `feesValueUsdc` to size the keeper's profit (finder fee = FINDER_FEE_BPS of the fee value).
-    /// @return amount0 claimable currency0 (raw): retained balance + pending fees.
-    /// @return amount1 claimable currency1 (raw): retained balance + pending fees.
+    /// @return vltAmount claimable VLT (raw 18d): retained balance + pending fees.
+    /// @return usdcAmount claimable USDC (raw 6d): retained balance + pending fees.
     /// @return valueUsdc total claimable value in USDC (6-dec raw): retained + fees. Gate input.
     /// @return feesValueUsdc value in USDC (6-dec raw) of the PENDING POOL FEES only — the finder
     /// fee (the keeper's revenue) is FINDER_FEE_BPS of this, NOT of `valueUsdc`.
     function compoundClaimable()
         public
         view
-        returns (uint256 amount0, uint256 amount1, uint256 valueUsdc, uint256 feesValueUsdc)
+        returns (uint256 vltAmount, uint256 usdcAmount, uint256 valueUsdc, uint256 feesValueUsdc)
     {
         // Pending pool fees, derived exactly as V4 credits them on the next modifyLiquidity:
         // liquidity × (feeGrowthInside_now − feeGrowthInside_last), in Q128. No state change.
@@ -291,8 +313,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
             pending1 = FullMath.mulDiv(liq, fg1 - fg1Last, Q128);
         }
 
-        amount0 = _selfBalance(currency0) + pending0;
-        amount1 = _selfBalance(currency1) + pending1;
+        uint256 amount0 = _selfBalance(currency0) + pending0;
+        uint256 amount1 = _selfBalance(currency1) + pending1;
+        (vltAmount, usdcAmount) = _toVltUsdc(amount0, amount1);
 
         // slither-disable-next-line unused-return
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
@@ -300,13 +323,13 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         feesValueUsdc = _valueInUsdc(pending0, pending1, uint256(sqrtPriceX96));
     }
 
-    /// @notice Two-token analog of ERC-4626 `previewRedeem`: the principal (currency0, currency1) a
+    /// @notice Two-token analog of ERC-4626 `previewRedeem`: the principal (VLT, USDC) a
     /// redeemer would receive for `shares` at the CURRENT price, WITHOUT executing. Excludes the
     /// position's uncompounded fees (those are retained for all holders, exactly as redeem() does).
     /// @dev An ESTIMATE for display only — the in-kind split moves with the live price and V4 rounds
     /// liquidity-removal amounts DOWN, so the real redeem() may return a hair less. redeem() takes no
     /// min bounds (in-kind redemption isn't value-extractable), so this needn't gate anything.
-    function previewRedeem(uint256 shares) public view returns (uint256 amount0, uint256 amount1) {
+    function previewRedeem(uint256 shares) public view returns (uint256 vltAmount, uint256 usdcAmount) {
         uint256 supply = totalSupply();
         // slither-disable-next-line incorrect-equality
         if (shares == 0 || supply == 0) return (0, 0);
@@ -317,8 +340,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
         // Full-range: the price is always within (tickLower, tickUpper), so both legs are active.
         // roundUp=false mirrors the amount V4 credits the remover on modifyLiquidity.
-        amount0 = SqrtPriceMath.getAmount0Delta(sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickUpper), liquidityToRemove, false);
-        amount1 = SqrtPriceMath.getAmount1Delta(TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, liquidityToRemove, false);
+        uint256 amount0 = SqrtPriceMath.getAmount0Delta(sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickUpper), liquidityToRemove, false);
+        uint256 amount1 = SqrtPriceMath.getAmount1Delta(TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, liquidityToRemove, false);
+        (vltAmount, usdcAmount) = _toVltUsdc(amount0, amount1);
     }
 
     /// @dev Value a (currency0, currency1) raw pair in USDC (6-dec raw) at sqrt price `sp`.
@@ -346,12 +370,18 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// @param deadline    Unix timestamp after which the deposit reverts. Guards a transaction
     ///                    that lingers in the mempool from executing under stale market terms
     ///                    (minShares bounds the share count but not the dollar terms of entry).
+    /// @param recipient   Owner of the minted shares. Tokens are always pulled from — and any
+    ///                    unused excess refunded to — msg.sender; only the shares (and the event
+    ///                    attribution) go to `recipient`. Lets a periphery zapper mint straight
+    ///                    to the end wallet instead of forwarding shares after the fact.
     function deposit(
         uint256 vltAmount,
         uint256 usdcAmount,
         uint256 minShares,
-        uint256 deadline
+        uint256 deadline,
+        address recipient
     ) external nonReentrant returns (uint256 shares) {
+        require(recipient != address(0), "zero-recipient");
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
         // solhint-disable not-rely-on-time
         // slither-disable-next-line timestamp
@@ -380,7 +410,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                 abi.encode(DepositData(msg.sender, retain0, retain1))
             )
         );
-        uint128 liquidityAdded = abi.decode(res, (uint128));
+        (uint128 liquidityAdded, uint256 paid0, uint256 paid1) =
+            abi.decode(res, (uint128, uint256, uint256));
         require(liquidityAdded > 0, "no-liquidity-added");
 
         uint256 supply = totalSupply();
@@ -399,20 +430,31 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         }
 
         require(shares >= minShares, "slippage-shares");
-        _mint(msg.sender, shares);
-        emit Deposit(msg.sender, vltAmount, usdcAmount, shares, liquidityAdded);
+        _mint(recipient, shares);
+        (uint256 vltUsed, uint256 usdcUsed) = _toVltUsdc(paid0, paid1);
+        emit Deposit(msg.sender, recipient, vltUsed, usdcUsed, shares, liquidityAdded);
     }
 
     /*//////////////////////////////////////////////////////////////
                                   REDEEM
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Burn vltUSDC shares; receive a pro-rata share of the LP in BOTH tokens (no auto-sell).
-    /// @dev USDC NOTE: if the caller is on USDC's blacklist, the USDC `take` leg reverts and the
-    /// whole redeem reverts. That is the caller's problem, not a vault solvency issue — VLT and the
-    /// position are untouched. There are no token approvals anywhere (settlement uses transfer), so
-    /// there is no stale-allowance surface.
-    function redeem(uint256 shares) external nonReentrant returns (uint256 amount0, uint256 amount1) {
+    /// @notice Burn the caller's vltUSDC shares; send `receiver` a pro-rata share of the LP in
+    /// BOTH tokens (no auto-sell).
+    /// @dev USDC NOTE: if the receiver is on USDC's blacklist, the USDC `take` leg reverts and the
+    /// whole redeem reverts — the caller can simply redeem to a different receiver. Not a vault
+    /// solvency issue: VLT and the position are untouched. There are no token approvals anywhere
+    /// (settlement uses transfer), so there is no stale-allowance surface.
+    /// @param shares    Shares to burn (always the caller's — there is no owner/operator model).
+    /// @param receiver  Destination for both redeemed tokens.
+    /// @return vltOut   VLT sent to `receiver` (raw 18d).
+    /// @return usdcOut  USDC sent to `receiver` (raw 6d).
+    function redeem(uint256 shares, address receiver)
+        external
+        nonReentrant
+        returns (uint256 vltOut, uint256 usdcOut)
+    {
+        require(receiver != address(0), "zero-receiver");
         // Foolproof by design: takes ONLY shares, no slippage bounds. Redemption is in-kind (removes
         // pro-rata liquidity, returns both tokens, never swaps), so it can't be sandwiched for value
         // — a manipulated-then-restored price leaves the redeemer with a bundle worth MORE at the
@@ -432,10 +474,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         _burn(msg.sender, shares);
 
         bytes memory res = poolManager.unlock(
-            abi.encode(Action.REDEEM, abi.encode(RedeemData(msg.sender, liquidityToRemove)))
+            abi.encode(Action.REDEEM, abi.encode(RedeemData(receiver, liquidityToRemove)))
         );
-        (amount0, amount1) = abi.decode(res, (uint256, uint256));
-        emit Redeem(msg.sender, shares, amount0, amount1);
+        (uint256 amount0, uint256 amount1) = abi.decode(res, (uint256, uint256));
+        (vltOut, usdcOut) = _toVltUsdc(amount0, amount1);
+        emit Redeem(msg.sender, receiver, shares, vltOut, usdcOut);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -594,10 +637,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                 retain1 += uint256(uint128(f1));
             }
             if (f0 > 0 || f1 > 0) {
-                emit FeesRetained(
+                (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(
                     f0 > 0 ? uint256(uint128(f0)) : 0,
                     f1 > 0 ? uint256(uint128(f1)) : 0
                 );
+                emit FeesRetained(vltFees, usdcFees);
             }
         }
 
@@ -606,15 +650,16 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         //    so the vault now holds (bought VLT + remaining USDC) on top of the retained balances.
         uint256 bal0 = _selfBalance(currency0);
         uint256 bal1 = _selfBalance(currency1);
-        uint128 liquidityAdded = _addLiquidity(
+        (uint128 liquidityAdded, uint256 paid0, uint256 paid1) = _addLiquidity(
             bal0 > retain0 ? bal0 - retain0 : 0,
             bal1 > retain1 ? bal1 - retain1 : 0
         );
 
-        // 3. Refund the depositor's unused contribution; keep the retained (vault-owned) tokens.
-        _refundDust(d.user, retain0, retain1);
+        // 3. Refund the payer's unused contribution; keep the retained (vault-owned) tokens.
+        _refundDust(d.payer, retain0, retain1);
 
-        return abi.encode(liquidityAdded);
+        // paid0/1 are what the pool actually consumed — the depositor's true cost basis.
+        return abi.encode(liquidityAdded, paid0, paid1);
     }
 
     // Reentrancy-events: the only external calls are into the trusted PoolManager within our own
@@ -641,9 +686,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         uint256 amount1 = uint256(int256(principalDelta.amount1()));
         // No min-out check: in-kind redemption is not value-extractable (see redeem()).
 
-        // Principal to the redeemer.
-        if (amount0 > 0) poolManager.take(currency0, d.user, amount0);
-        if (amount1 > 0) poolManager.take(currency1, d.user, amount1);
+        // Principal to the receiver.
+        if (amount0 > 0) poolManager.take(currency0, d.receiver, amount0);
+        if (amount1 > 0) poolManager.take(currency1, d.receiver, amount1);
 
         // Uncompounded fees retained at the vault (address(this)) for all holders.
         int128 f0 = feesAccrued.amount0();
@@ -651,10 +696,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         if (f0 > 0) poolManager.take(currency0, address(this), uint256(uint128(f0)));
         if (f1 > 0) poolManager.take(currency1, address(this), uint256(uint128(f1)));
         if (f0 > 0 || f1 > 0) {
-            emit FeesRetained(
+            (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(
                 f0 > 0 ? uint256(uint128(f0)) : 0,
                 f1 > 0 ? uint256(uint128(f1)) : 0
             );
+            emit FeesRetained(vltFees, usdcFees);
         }
 
         return abi.encode(amount0, amount1);
@@ -724,7 +770,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         uint256 bal1 = _selfBalance(currency1);
         uint256 reinvest0 = bal0 > finder0 ? bal0 - finder0 : 0;
         uint256 reinvest1 = bal1 > finder1 ? bal1 - finder1 : 0;
-        uint128 liquidityAdded = _addLiquidity(reinvest0, reinvest1);
+        // Consumed amounts are unused here: Compound's fee fields already carry the accounting.
+        (uint128 liquidityAdded,,) = _addLiquidity(reinvest0, reinvest1);
 
         // 6. Pay the finder LAST, from the vault's own balance (interactions after effects).
         //    Reinvesting only (bal - finderCut) above guarantees the post-settle balance still
@@ -733,7 +780,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         if (finder0 > 0) IERC20(Currency.unwrap(currency0)).safeTransfer(c.finder, finder0);
         if (finder1 > 0) IERC20(Currency.unwrap(currency1)).safeTransfer(c.finder, finder1);
 
-        emit Compound(c.finder, fee0, fee1, finder0, finder1, liquidityAdded);
+        {
+            (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(fee0, fee1);
+            (uint256 vltFinder, uint256 usdcFinder) = _toVltUsdc(finder0, finder1);
+            emit Compound(c.finder, vltFees, usdcFees, vltFinder, usdcFinder, liquidityAdded);
+        }
         return abi.encode(liquidityAdded);
     }
 
@@ -742,16 +793,22 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Add liquidity from the vault's current token balances and settle what we owe.
-    function _addLiquidity(uint256 amount0Desired, uint256 amount1Desired) internal returns (uint128 liquidity) {
+    /// @return liquidity  L actually added to the position.
+    /// @return paid0      currency0 the pool consumed (settled) for the add.
+    /// @return paid1      currency1 the pool consumed (settled) for the add.
+    function _addLiquidity(uint256 amount0Desired, uint256 amount1Desired)
+        internal
+        returns (uint128 liquidity, uint256 paid0, uint256 paid1)
+    {
         // slither-disable-next-line incorrect-equality
-        if (amount0Desired == 0 && amount1Desired == 0) return 0;
+        if (amount0Desired == 0 && amount1Desired == 0) return (0, 0, 0);
 
         // We need only the price from slot0.
         // slither-disable-next-line unused-return
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
         liquidity = _liquidityForAmounts(sqrtPriceX96, amount0Desired, amount1Desired);
         // slither-disable-next-line incorrect-equality
-        if (liquidity == 0) return 0;
+        if (liquidity == 0) return (0, 0, 0);
 
         // Callers (deposit/compound) harvest fees BEFORE this, so feesAccrued here is ~0; any
         // residual from an intervening swap on our own position is netted into `delta` and
@@ -769,8 +826,14 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         );
 
         // Adding liquidity produces negative deltas (we owe the pool): settle each.
-        if (delta.amount0() < 0) _settle(currency0, uint256(uint128(-delta.amount0())));
-        if (delta.amount1() < 0) _settle(currency1, uint256(uint128(-delta.amount1())));
+        if (delta.amount0() < 0) {
+            paid0 = uint256(uint128(-delta.amount0()));
+            _settle(currency0, paid0);
+        }
+        if (delta.amount1() < 0) {
+            paid1 = uint256(uint128(-delta.amount1()));
+            _settle(currency1, paid1);
+        }
     }
 
     /// @dev Compute and execute the compound rebalance swap: move ~half the value-imbalance from
@@ -867,6 +930,17 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
 
     function _selfBalance(Currency currency) internal view returns (uint256) {
         return IERC20(Currency.unwrap(currency)).balanceOf(address(this));
+    }
+
+    /// @dev Map a currency0/1-ordered pair to (VLT, USDC). The single boundary between the
+    /// pool's address-sorted ordering (all internal/V4 plumbing) and the token-named external
+    /// surface (all events and external view returns).
+    function _toVltUsdc(uint256 amount0, uint256 amount1)
+        internal
+        view
+        returns (uint256 vltAmount, uint256 usdcAmount)
+    {
+        (vltAmount, usdcAmount) = usdcIsCurrency0 ? (amount1, amount0) : (amount0, amount1);
     }
 
     /// @dev Refund the depositor's leftover zap dust — everything ABOVE the retained

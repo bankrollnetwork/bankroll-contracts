@@ -24,8 +24,22 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
     it("deposit(0,0) reverts", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await expect(
-        ctx.vault.connect(ctx.alice).deposit(0, 0, 0, ethers.MaxUint256)
+        ctx.vault.connect(ctx.alice).deposit(0, 0, 0, ethers.MaxUint256, ctx.alice.address)
       ).to.be.revertedWith("zero-deposit");
+    });
+
+    it("deposit to the zero address reverts", async () => {
+      const ctx = await loadFixture(deployVaultFixture);
+      await expect(
+        ctx.vault.connect(ctx.alice).deposit(1, 1, 0, ethers.MaxUint256, ethers.ZeroAddress)
+      ).to.be.revertedWith("zero-recipient");
+    });
+
+    it("redeem to the zero address reverts", async () => {
+      const ctx = await loadFixture(deployVaultFixture);
+      await expect(
+        ctx.vault.connect(ctx.alice).redeem(1, ethers.ZeroAddress)
+      ).to.be.revertedWith("zero-receiver");
     });
 
     it("deposit past its deadline reverts", async () => {
@@ -123,7 +137,9 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       await (await ctx.vlt.arm(true)).wait();
 
       // The deposit's VLT transferFrom triggers a reentrant compound() while nonReentrant is held.
-      await (await ctx.vault.connect(ctx.alice).deposit(vltAmt, usdcAmt, 0, ethers.MaxUint256)).wait();
+      await (
+        await ctx.vault.connect(ctx.alice).deposit(vltAmt, usdcAmt, 0, ethers.MaxUint256, ctx.alice.address)
+      ).wait();
 
       expect(await ctx.vlt.reentryAttempted()).to.equal(true);
       expect(await ctx.vlt.reentryReverted()).to.equal(true);
@@ -185,7 +201,11 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
           }
         })
       );
-      const { finder0, finder1 } = ev.args;
+      // Expectations below are computed in pool (currency0/1) order from the swap inputs;
+      // the event is token-named, so map it back through the fixture's ordering.
+      const [finder0, finder1] = ctx.usdcIsCurrency0
+        ? [ev.args.usdcFinder, ev.args.vltFinder]
+        : [ev.args.vltFinder, ev.args.usdcFinder];
 
       // gross fee per currency = inputs * fee / 1e6 ; finder = 1% of that.
       const feePips = BigInt(ctx.cfg.fee);

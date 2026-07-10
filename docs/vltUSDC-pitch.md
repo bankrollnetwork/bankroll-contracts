@@ -13,7 +13,7 @@ When you deposit USDC, the vault mints you **vltUSDC — a standard ERC-20 token
 - **Real yield, not emissions.** Returns come from actual trading volume, compounded — no inflationary rewards, no reflexive peg mechanics.
 - **Lower-beta exposure.** Roughly half your capital sits in USDC, so you ride VLT's growth with materially less volatility than holding it outright.
 - **Truly passive.** Auto-compounding, no rebalancing, no keeper to trust; anyone can trigger the compound for a small finder's fee.
-- **Self-custodied and verifiable.** vltUSDC sits in your own wallet — never ours. Non-upgradeable, no oracle, hardcoded fee, and admin keys that can't touch deposits.
+- **Self-custodied and verifiable.** vltUSDC sits in your own wallet — never ours. Non-upgradeable, no oracle, hardcoded fee, and no admin keys at all — the vault is fully ownerless.
 - **Self-reinforcing liquidity.** Protocol buy-flow and ecosystem fee routing deepen the pool, which captures more fees — compounding the compounding.
 - **Variable yield and asset growth.** Both the fee yield and the token's value scale with market demand and trading activity — the more the pool is used, the more it compounds.
 - **Asset-backed price.** vltUSDC's value is set by the real VLT/USDC pool it holds — not a promised peg. No algo tricks, no hidden leverage.
@@ -56,25 +56,25 @@ vltUSDC is an ERC-20 share over a single full-range Uniswap V4 VLT/USDC position
 
 ## Core Flows
 
-- **`deposit(usdc, swapToVlt, minVltOut, minShares)`** — Pulls USDC, swaps a slippage-bounded portion to VLT, adds liquidity, refunds dust, and mints shares pro-rata to the liquidity actually added (ΔL) — measured from the pool, not contract balances, which neutralizes donation and first-deposit inflation attacks.
-- **`redeem(shares, minAmount0, minAmount1)`** — Burns shares, removes the pro-rata slice of liquidity, and returns both tokens in kind — no swap, no oracle, no forced sale. Cannot be rendered insolvent: you only ever withdraw what the position already holds.
-- **`compound(swapAmountIn, zeroForOne, minOut)`** — Permissionless. Collects fees, pays the caller a hardcoded 1% finder's fee in kind, reinvests the remaining 99% as liquidity, and mints no new shares — so L rises against a fixed supply and every holder's redemption value grows automatically.
+- **`deposit(vlt, usdc, minShares, deadline, recipient)`** — Pulls both tokens, adds liquidity (no swap inside the vault), refunds any imbalanced excess to the payer, and mints shares to `recipient` pro-rata to the liquidity actually added (ΔL) — measured from the pool, not contract balances, which neutralizes donation and first-deposit inflation attacks. USDC-only entry goes through the periphery `ZapHelper.zapDeposit(...)`, which buys VLT on the open market (buy pressure) and deposits the pair; shares still mint straight to the end wallet.
+- **`redeem(shares, receiver)`** — Burns the caller's shares, removes the pro-rata slice of liquidity, and returns both tokens in kind to `receiver` — no swap, no oracle, no forced sale, no slippage inputs needed (in-kind exit can't be sandwiched for value). Cannot be rendered insolvent: you only ever withdraw what the position already holds.
+- **`compound()`** — Permissionless and argument-free. Collects fees, pays the caller a hardcoded 1% finder's fee in kind, auto-rebalances within tightly capped bounds, reinvests the rest as liquidity, and mints no new shares — so L rises against a fixed supply and every holder's redemption value grows automatically.
 
 ## Trust Model
 
 - **Non-upgradeable.** No proxy, no migration path — the code that ships is the code that runs.
-- **No admin keys on funds.** Owner can pause deposits and sweep stray tokens only — never USDC, VLT, or the position.
+- **Fully ownerless.** There is no owner, no admin role, no pause, no sweep — every parameter is a constant or fixed at deploy, and deposit/redeem/compound are permissionless. Nobody, including the deployer, holds any key over the vault.
 - **Solvent by construction.** Shares are liquidity claims; in-kind redemption can't exceed what's in the pool.
 - **Oracle-free.** Liquidity-denominated shares plus in-kind exit remove every price-manipulation surface.
-- **Hardened entrypoints.** Reentrancy guards, SafeERC20, checks-effects-interactions, first-deposit lock, slippage bounds on every swap.
-- **Exit always open.** Redemption is never pausable.
+- **Hardened entrypoints.** Reentrancy guards, SafeERC20, checks-effects-interactions, first-deposit lock, deadlines and slippage bounds on entry, and a hard-capped compound rebalance (fee-scaled notional, ≤5% price move).
+- **Exit always open.** Nothing in the system is pausable — redemption least of all.
 
 ## Risk Surface
 
 - **Impermanent loss.** On large VLT moves the position underperforms holding the two tokens separately.
 - **Underlying asset risk.** VLT is volatile with concentrated liquidity; price and depth risk apply.
 - **Variable yield.** Fees track trading volume; quiet markets compound slower.
-- **Deposit-swap exposure.** The USDC to VLT entry swap touches pool price, bounded by off-chain quote + on-chain minOut.
+- **Deposit-swap exposure.** The USDC to VLT entry swap (in the replaceable ZapHelper periphery, never the vault) executes an off-chain-computed route, bounded by on-chain `minVltOut` and a deadline.
 - **Smart-contract risk.** Independent audit by Shieldify prior to mainnet deployment.
 
 ## Parameters
@@ -87,6 +87,6 @@ vltUSDC is an ERC-20 share over a single full-range Uniswap V4 VLT/USDC position
 | Finder's fee | 1% of harvested fees, hardcoded |
 | VLT token | 0x6b785a0322126826d8226d77e173d75DAfb84d11 |
 | Vault contract | Published at deployment |
-| Audit | Shieldify — in progress |
+| Audit | Shieldify — scheduled prior to mainnet (internal review complete, see AUDIT.MD) |
 
 *Technical summary for evaluation only; not a specification or audit, and subject to change prior to deployment.*

@@ -51,13 +51,13 @@ async function main() {
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 1800);
 
   // Preview shares to sanity-check the first-deposit liquidity lock before committing.
-  const previewShares = await vault.deposit.staticCall(vltAmount, usdcAmount, 0n, deadline);
+  const previewShares = await vault.deposit.staticCall(vltAmount, usdcAmount, 0n, deadline, signer.address);
   console.log(`  preview shares (ΔL - MINIMUM_LIQUIDITY) = ${previewShares}`);
   if (previewShares <= 0n) {
     throw new Error("First deposit would not exceed MINIMUM_LIQUIDITY — increase SEED amounts.");
   }
 
-  const rc = await (await vault.deposit(vltAmount, usdcAmount, 0n, deadline)).wait();
+  const rc = await (await vault.deposit(vltAmount, usdcAmount, 0n, deadline, signer.address)).wait();
   console.log(`✓ First deposit complete in tx ${rc.hash}`);
   console.log(`  vault position liquidity = ${await vault.positionLiquidity()}`);
   console.log(`  your vltUSDC balance     = ${await vault.balanceOf(signer.address)}`);

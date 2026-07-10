@@ -110,7 +110,9 @@ async function main() {
     );
     await (await usdc.approve(dep.zapHelper, seedUsdc)).wait();
     // MaxUint256 deadline: the fork's evm_increaseTime jumps make any wall-clock deadline stale.
-    await (await zap.zapDeposit(seedUsdc, swapAmt, 0n, 0n, ethers.MaxUint256, buildSwapData(cfg.usdc, cfg.vlt, swapAmt))).wait();
+    await (
+      await zap.zapDeposit(seedUsdc, swapAmt, 0n, 0n, ethers.MaxUint256, keeper.address, buildSwapData(cfg.usdc, cfg.vlt, swapAmt))
+    ).wait();
     console.log(`✓ Seeded — totalSupply now ${await vault.totalSupply()}.`);
   }
 

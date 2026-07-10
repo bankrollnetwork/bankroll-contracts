@@ -308,7 +308,10 @@ re-confirmed at the Shieldify review as the README requests.
 `zap`/`zapDeposit` emit nothing. Vault events cover deposits, but off-chain accounting of
 zap routing, under-spends, and sweeps would benefit from a `ZapExecuted`-style event.
 (Consistent with the project's no-event-log-dependency stance for *reads*; emitting is
-still cheap and useful for indexers.)
+still cheap and useful for indexers.) *Update (July 10, 2026):* the §7b change moved
+wallet attribution into the vault's own `Deposit` event (`recipient`), so the remaining
+benefit here is routing/under-spend observability only; the accepted decision (no helper
+events) stands.
 
 ### I-09 — Dependency versions are caret ranges, not exact pins
 
@@ -450,6 +453,86 @@ new regression test (`vault.fees.test.js` — "emits complete fee-accounting eve
 asserting `FeesRetained` matches computed gross fees on both paths and
 `finder = fee / 100` exactly; suite at 47 passing, Slither 0, Solhint clean after the
 change. Frontend ABI (`src/js/vault-abi.js`) updated to match.
+
+*(Naming note: §7c later renamed these event fields to token-named `vltFees`/`usdcFees` /
+`vltFinder`/`usdcFinder` — same layout and topic0 hashes, so the identity above is unchanged.)*
+
+---
+
+## 7b. Post-audit change (July 10, 2026): recipient/receiver params + consumed-amount deposit accounting
+
+Motivated by per-wallet PnL tracking from logs alone: the original `Deposit` event attributed
+zapped entries to the ZapHelper (`user = msg.sender`) and reported the GROSS amounts pulled
+(pre-refund), so individual cost basis required joining raw ERC-20 `Transfer` logs.
+
+**Changes** (`VltUsdcVault.sol` entrypoints/events/`_addLiquidity`, `ZapHelper.sol`):
+
+- `deposit(vltAmount, usdcAmount, minShares, deadline, recipient)` — shares mint to
+  `recipient` (`require != 0`). Tokens are still pulled from — and any imbalanced excess
+  refunded to — `msg.sender` (the payer).
+- `Deposit(address indexed sender, address indexed recipient, uint256 vltUsed,
+  uint256 usdcUsed, uint256 sharesOut, uint128 liquidityAdded)` — `vltUsed`/`usdcUsed` are
+  the amounts the pool actually CONSUMED (decoded from the unlock callback's settle
+  amounts, not balance reads), so the event alone is exact cost basis.
+- `redeem(shares, receiver)` — burns the CALLER's shares (no owner/operator model), pays
+  both tokens to `receiver` (`require != 0`).
+  `Redeem(address indexed owner, address indexed receiver, uint256 sharesIn,
+  uint256 vltOut, uint256 usdcOut)` (token-named per §7c).
+- `_addLiquidity` now returns `(liquidity, paid0, paid1)`; the compound path discards the
+  paid amounts (its accounting is already carried by the `Compound` fee fields).
+- `ZapHelper.zapDeposit(..., recipient, swapData)` passes the recipient through; the
+  helper's share-forwarding transfer is removed (the helper never holds shares at any
+  point). Dust sweeps still go to the caller, who paid.
+
+**Security review of the change:** `recipient`/`receiver` are caller-chosen output
+destinations — the same trust class as `zap()`'s existing `recipient` (L-02): the caller
+can only spend their own tokens and burn their own shares, so misdirection is
+self-inflicted, never theft. Refunds deliberately stay with the payer so `deposit` gains
+no USDC-blacklist revert path on a third-party address; `redeem`'s blacklist note moves
+from caller to receiver (caller-chosen, and the caller can simply redeem to another
+receiver). No storage layout, share math, or settlement logic changed. Regression tests:
+`vault.flows.test.js` — "mints shares to `recipient`…CONSUMED amounts" (conservation:
+`used == pulled − refunded`) and "pays a designated receiver…"; `vault.edge.test.js` —
+zero-address reverts; `scripts.quoter.test.js` — "zapDeposit mints shares DIRECTLY to
+`recipient`…". Suite at 52 passing, Solhint clean. Dune queries/README
+(`periphery/dune`) updated to the new topic0 hashes and exact-volume semantics.
+
+---
+
+## 7c. Post-audit change (July 10, 2026): token-named external surface (no currency0/1 leakage)
+
+Convention decision following §7b: the external surface previously mixed token-named fields
+(`Deposit.vltUsed/usdcUsed`) with pool-ordered ones (`Redeem.amount0Out/1Out`,
+`Compound.fee0/fee1`, `previewRedeem` returns), forcing every consumer to carry the
+`usdcIsCurrency0` mapping for half the fields. Since the vault is pair-specific by
+construction (immutable `vlt`/`usdc`, single pool), currency ordering is an address-sort
+accident with no semantic content — so ALL events and external view returns are now
+token-named (`vlt*` 18d / `usdc*` 6d), and the currency0/1 ordering stays strictly internal
+(callbacks, `BalanceDelta` plumbing, `_rebalance`).
+
+**Changes** (`VltUsdcVault.sol`):
+
+- New internal `_toVltUsdc(amount0, amount1)` — the single mapping boundary, applied at
+  every emit/return.
+- `Redeem(owner, receiver, sharesIn, vltOut, usdcOut)`;
+  `Compound(finder, vltFees, usdcFees, vltFinder, usdcFinder, liquidityAdded)`;
+  `FeesRetained(vltFees, usdcFees)`.
+- `redeem` returns `(vltOut, usdcOut)`; `previewRedeem` returns `(vltAmount, usdcAmount)`;
+  `compoundClaimable` returns `(vltAmount, usdcAmount, valueUsdc, feesValueUsdc)`.
+- Renames only — no types changed, so all four topic0 hashes are UNCHANGED (topic0 hashes
+  arg types, not names); no storage, math, or control-flow changes.
+
+**Verification note:** a currency-order mapping like `_toVltUsdc` is the kind of code that
+fails invisibly — when VLT sorts as currency0 the mapping is the identity, so a missed or
+inverted call site produces correct output in one ordering and silently swapped 18d/6d
+amounts in the other. The coverage is therefore pinned under both orderings: the test
+fixture accepts `forceUsdcIsCurrency0` (mock-token ordering is otherwise deploy-nonce
+dependent) and a dedicated suite (`vault.flows.test.js` — "token-named events/views hold
+under BOTH currency orderings") asserts every event/view field against per-token wallet
+deltas under BOTH orderings.
+Consumers updated in the same pass: Dune queries/README, DefiLlama fees + TVL adapters and
+fork harness, frontend ABI + test client. Suite at 54 passing (plus the 2 mainnet-fork
+tests), Solhint clean, Slither 0 findings (96 detectors, re-run July 10 post-§7b/§7c).
 
 ---
 

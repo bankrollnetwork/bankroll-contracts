@@ -128,12 +128,17 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
     const { gross0, gross1 } = await setupWithFees(ctx);
 
+    // Expectations are computed in pool (currency0/1) order from the swap inputs; the events
+    // are token-named (vlt*/usdc*), so map each event back through the fixture's ordering.
+    const to01 = (vltVal, usdcVal) => (ctx.usdcIsCurrency0 ? [usdcVal, vltVal] : [vltVal, usdcVal]);
+
     // 1. A redeem harvests the pending fees to the vault and reports the amounts.
     const shares = await ctx.vault.balanceOf(ctx.alice.address);
     const rcRedeem = await (await redeem(ctx, ctx.alice, shares / 100n)).wait();
     const evRedeem = await getEvent(ctx.vault, rcRedeem, "FeesRetained");
-    near(evRedeem.fee0, gross0, 200, "redeem FeesRetained.fee0");
-    near(evRedeem.fee1, gross1, 200, "redeem FeesRetained.fee1");
+    const [redFee0, redFee1] = to01(evRedeem.vltFees, evRedeem.usdcFees);
+    near(redFee0, gross0, 200, "redeem FeesRetained (currency0 side)");
+    near(redFee1, gross1, 200, "redeem FeesRetained (currency1 side)");
 
     // 2. Fresh one-sided volume, then a deposit harvests + reports it too.
     const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
@@ -143,16 +148,19 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     await fundUsdc(ctx, ctx.bob, USDC(10000));
     const rcDep = await (await deposit(ctx, ctx.bob, USDC(10000))).wait();
     const evDep = await getEvent(ctx.vault, rcDep, "FeesRetained");
-    near(evDep.fee0, freshDep0, 300, "deposit FeesRetained.fee0");
-    expect(evDep.fee1).to.equal(0n); // one-directional volume: no currency1 fees accrued
+    const [depFee0, depFee1] = to01(evDep.vltFees, evDep.usdcFees);
+    near(depFee0, freshDep0, 300, "deposit FeesRetained (currency0 side)");
+    expect(depFee1).to.equal(0n); // one-directional volume: no currency1 fees accrued
 
     // 3. More volume, then Compound reports the FULL fresh harvest with the 1% cut carved from it.
     await (await swapExact(ctx, ctx.seeder, true, in0)).wait();
     const freshCmp0 = (in0 * BigInt(ctx.cfg.fee)) / 1_000_000n;
     const rcCmp = await (await compound(ctx, ctx.finder)).wait();
     const evCmp = await getEvent(ctx.vault, rcCmp, "Compound");
-    near(evCmp.fee0, freshCmp0, 300, "Compound.fee0 (full fresh harvest, not just the finder cut)");
-    expect(evCmp.finder0).to.equal(evCmp.fee0 / 100n); // FINDER_FEE_BPS = 1% of the emitted fee
-    expect(evCmp.finder1).to.equal(evCmp.fee1 / 100n);
+    const [cmpFee0, cmpFee1] = to01(evCmp.vltFees, evCmp.usdcFees);
+    const [cmpFinder0, cmpFinder1] = to01(evCmp.vltFinder, evCmp.usdcFinder);
+    near(cmpFee0, freshCmp0, 300, "Compound fees (full fresh harvest, not just the finder cut)");
+    expect(cmpFinder0).to.equal(cmpFee0 / 100n); // FINDER_FEE_BPS = 1% of the emitted fee
+    expect(cmpFinder1).to.equal(cmpFee1 / 100n);
   });
 });
