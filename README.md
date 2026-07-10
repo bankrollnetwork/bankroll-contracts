@@ -1,0 +1,354 @@
+# vltUSDC Vault — Hardhat workspace
+
+Hardhat build/test/deploy pipeline for `VltUsdcVault.sol`, an auto-compounding Uniswap
+**V4** VLT/USDC full-range LP vault. ERC-20 shares are denominated in pool **liquidity (L)**.
+
+**Core/periphery split:** the **vault** takes a balanced **VLT + USDC** pair → shares, with *no
+swap and no external dependency* (deterministic, oracle-free, minimal-trust). A separate,
+replaceable **`ZapHelper`** (periphery) converts a USDC-only deposit into that pair by **buying
+VLT from its external market** (the buy pressure that lifts VLT's price) via an off-chain Uniswap
+route, then calling the vault. The vault doesn't reference the helper — topology changes only
+ever touch periphery, and a zapper bug can't affect the vault or its holders. See
+[`docs/vltUSDC-pitch.md`](docs/vltUSDC-pitch.md) for the product overview; this workspace
+implements the `vltUSDC-vault-TODO.md` completion plan.
+
+This workspace is **isolated** from the parent jQuery/gulp frontend — it has its own
+`package.json` and `node_modules`.
+
+> **Status:** compiles, fully fork-/PoolManager-tested, and deployable on testnet. **Not yet
+> mainnet-ready** — still pending a Slither pass and the Shieldify audit (see
+> [Remaining before mainnet](#remaining-before-mainnet)).
+
+---
+
+## Layout
+
+```
+src/contracts/
+├── contracts/
+│   ├── VltUsdcVault.sol          # the vault: balanced VLT+USDC → shares, no external deps
+│   ├── ZapHelper.sol             # PERIPHERY: USDC → buy VLT (off-chain route) → vault.deposit → shares
+│   └── test/                     # test-only: MockERC20, ReentrantToken, MockSwapRouter, MockPermit2, V4Harness
+├── scripts/
+│   ├── config.js                 # network-aware params (mainnet defaults + env overrides)
+│   ├── lib/pool.js               # extsload price reads + off-chain zap quoter
+│   ├── deploy_zaphelper.js       # deploy the ZapHelper (run before the vault)
+│   ├── 00_create_and_init_pool.js
+│   ├── 01_deploy_vault.js
+│   ├── 02_seed_first_deposit.js
+│   ├── 03_verify_etherscan.js
+│   └── dev/                      # local-only bootstrap helpers
+├── periphery/
+│   ├── defillama/                # submission-ready TVL + fees adapters (+ fork test harness)
+│   └── dune/                     # DuneSQL dashboard queries (fees, TVL, APR, keepers, holders)
+├── test/
+│   ├── helpers/                  # fixture (real PoolManager + mocks) + math
+│   ├── vault.flows.test.js       # deposit / redeem / compound happy paths
+│   ├── vault.edge.test.js        # edge, abuse, reentrancy, blacklist, admin
+│   ├── vault.fees.test.js        # BUG-1: deposit/redeem retain fees at the vault
+│   ├── vault.invariants.test.js  # stateful property harness
+│   ├── scripts.quoter.test.js    # quoter, buy-pressure, external-market sandwich bound
+│   ├── zaphelper.permit2.test.js # ZapHelper Permit2 branch (deterministic, no RPC)
+│   └── fork/                      # opt-in mainnet-fork: vault wiring + real UR/Permit2 zap (FORK=1)
+├── hardhat.config.js             # solc 0.8.26, viaIR, evmVersion cancun
+└── .env.example                  # copy to .env
+```
+
+## Prerequisites
+
+- Node 18+ (developed on Node 22). `npm install` in this directory.
+- For live deploys/forking: an archive RPC URL (Alchemy/Infura) and a funded deployer key.
+
+```bash
+cd src/contracts
+npm install
+cp .env.example .env   # then fill in
+```
+
+## Build
+
+```bash
+npm run build          # hardhat compile (solc 0.8.26, viaIR, cancun)
+```
+
+The contract relies on Uniswap V4 transient storage, so the EVM version is pinned to
+`cancun` and the IR pipeline is on (the PoolManager overflows the legacy stack otherwise).
+
+## Test
+
+The primary suite deploys the **real v4-core `PoolManager`** plus mock VLT (18d) / USDC (6d)
+to the in-process Hardhat chain, initializes the pool, seeds baseline liquidity, and
+exercises every flow. No archive RPC required.
+
+```bash
+npm test               # 47 passing (+ opt-in fork suite)
+npm run coverage       # solidity-coverage
+```
+
+What's covered (maps to the completion plan):
+
+| Plan item | Where |
+|---|---|
+| Compiles against pinned v4 (Blocker 0) | `npm run build` |
+| `_liquidityForAmounts` wired (Blocker 1) | every deposit/compound test |
+| Zero residual delta on every callback (Blocker 2) | implicit — the PoolManager reverts `CurrencyNotSettled` otherwise, so all passing flow tests prove it |
+| Off-chain quoter (Blocker 3): negligible dust + `minOut` holds under a sandwich | `scripts.quoter.test.js` |
+| Flows: deposit ΔL/dust, redeem in-kind, compound 1% finder / no shares / L up | `vault.flows.test.js`, `vault.edge.test.js` |
+| BUG-1: deposit/redeem retain fees at the vault (don't sweep them to the caller) | `vault.fees.test.js` |
+| ZapHelper: external sourcing, buy pressure, sandwich bound, Permit2 branch | `scripts.quoter.test.js`, `zaphelper.permit2.test.js` |
+| Invariants: solvency, no-free-shares, compound monotonicity, settlement | `vault.invariants.test.js` |
+| Edge/abuse: `deposit(0)`, redeem>balance, no-fee compound, first-deposit inflation, reentrancy, blacklisted USDC | `vault.edge.test.js` |
+| Security: `nonReentrant`/CEI, `MINIMUM_LIQUIDITY`, `sweep` can't touch core tokens, pause never blocks redeem | `vault.edge.test.js` |
+
+### Static analysis
+
+```bash
+npm run lint:sol       # Solhint security gate (.solhint.json) — JS-native, exit 0 clean
+npm run slither        # Slither — needs the local .venv (see below); exit 0 clean
+```
+
+- **Solhint** is wired as a security-focused lint gate (style/gas/doc rules scoped out so
+  it surfaces real issues only).
+- **Slither** runs from a local Python venv kept out of `package.json`:
+  ```bash
+  python3 -m venv .venv
+  .venv/bin/pip install "cbor2<5.6" slither-analyzer   # cbor2<5.6 avoids a Rust build on Py3.13
+  npm run slither
+  ```
+  All 14 raw findings were triaged: 1 was a **real bug (BUG-1, fixed — see below)**; the
+  other 13 are false positives (intentional tick-spacing snap, `== 0` guards, partial-tuple
+  reads, event-after-trusted-call under `nonReentrant`) suppressed with justified inline
+  `slither-disable` annotations. Slither now reports **0 results**.
+
+### Optional mainnet fork tests
+
+Need an **archive RPC** (e.g. Alchemy/Infura/QuickNode — a normal mainnet HTTPS endpoint; their
+free tiers serve archive state). Gated on `FORK=1`, so they skip cleanly otherwise.
+
+```bash
+# .env: MAINNET_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/KEY   FORK=1
+FORK=1 FORK_BLOCK_NUMBER=25217000 npx hardhat test test/fork/vault.fork.test.js test/fork/zaphelper.fork.test.js
+```
+
+> **Pin `FORK_BLOCK_NUMBER`.** Forking from "latest" (unpinned) caused intermittent 403s from the
+> RPC here; pinning a block also enables the local cache (Hardhat warns about this). Any recent
+> block works.
+> Also ensure the Alchemy app has **Ethereum Mainnet enabled** (Dashboard → app → Networks),
+> else every request 403s.
+
+- `vault.fork.test.js` — ✅ confirms the vault wires up against the actual **deployed** mainnet
+  PoolManager and that `positionLiquidity()` decodes its live storage. (Notes that the VLT/USDC
+  V4 pool isn't initialized on mainnet yet — expected.)
+- `zaphelper.fork.test.js` — ✅ the integration the local suite can't cover: `ZapHelper` executing
+  a **genuine Universal Router route via Permit2** against real liquidity. Validated at block
+  25217000 (sourced ≈4.99 WETH for 10k USDC). USDC→WETH by default; set
+  `ZAP_TEST_TOKEN_OUT`/`ZAP_TEST_V3_FEE` to target VLT once its mainnet route is known. Funds USDC
+  via `setStorageAt`.
+
+The Permit2 branch itself is also covered **deterministically (no RPC)** by
+`zaphelper.permit2.test.js` (mock Permit2 + a Permit2-pulling router), so the helper's
+production approval path doesn't rely solely on the fork run. A full deposit/redeem/compound
+cycle on a fork additionally needs the V4 VLT/USDC pool initialized + a VLT route.
+
+## Deploy
+
+Configure `.env` (RPC, `DEPLOYER_PRIVATE_KEY`, `ETHERSCAN_API_KEY`, and any address/price
+overrides). Mainnet PoolManager/USDC/VLT have built-in defaults; testnets need explicit
+addresses. Always pass `--network`:
+
+```bash
+# 0. Create + initialize the pool (idempotent — skips if already initialized).
+#    Needs INIT_USDC_PER_VLT or INIT_SQRT_PRICE_X96 if the pool doesn't exist yet.
+npx hardhat run scripts/00_create_and_init_pool.js --network sepolia
+
+# 1. Deploy the vault (guards: pool initialized). Has no external deps.
+npx hardhat run scripts/01_deploy_vault.js --network sepolia
+#    → prints the vault address; set VAULT_ADDRESS in .env
+
+# 1b. Deploy the periphery ZapHelper, pointed at the vault (whitelisted router + Permit2).
+npx hardhat run scripts/deploy_zaphelper.js --network sepolia
+#    → set ZAP_HELPER_ADDRESS in .env (the frontend uses it for USDC zap-deposits)
+
+# 2. Seed the first deposit directly with a balanced pair (SEED_VLT + SEED_USDC).
+npx hardhat run scripts/02_seed_first_deposit.js --network sepolia
+
+# 3. Verify the vault (+ ZapHelper if ZAP_HELPER_ADDRESS set) on Etherscan.
+npx hardhat run scripts/03_verify_etherscan.js --network sepolia
+```
+
+> On mainnet the canonical VLT/USDC 1% pool likely already exists — step 0 detects this and
+> no-ops, and you proceed straight to step 1.
+>
+> Ongoing user deposits go through the ZapHelper: the frontend builds the USDC→VLT route
+> (Uniswap Routing API, output to the helper) and calls `zapDeposit(usdc, swapUsdcToVlt,
+> minVltOut, minShares, deadline, swapData)`. Bootstrapping (step 2) uses a direct deposit, no
+> route needed.
+
+A complete local dry-run of this exact pipeline (used to validate it) is:
+
+```bash
+npx hardhat node &                                                        # terminal 1
+npx hardhat run scripts/dev/bootstrap_local.js   --network localhost      # PoolManager+tokens+MockSwapRouter → .env
+npx hardhat run scripts/00_create_and_init_pool.js --network localhost
+npx hardhat run scripts/dev/seed_baseline_local.js --network localhost
+npx hardhat run scripts/01_deploy_vault.js       --network localhost      # note the address
+VAULT_ADDRESS=0x... npx hardhat run scripts/deploy_zaphelper.js   --network localhost
+VAULT_ADDRESS=0x... npx hardhat run scripts/02_seed_first_deposit.js --network localhost  # direct VLT+USDC seed
+```
+
+## Changes applied to the scaffold
+
+All four "fix during implementation" items from the completion plan are done:
+
+- **`_liquidityForAmounts` wired** to v4-periphery `LiquidityAmounts.getLiquidityForAmounts`
+  with `TickMath.getSqrtPriceAtTick(tickLower/tickUpper)` — no hand-rolled rounding.
+- **`RedeemData.shares` → `RedeemData.liquidity`** (it always carried L, not a share count).
+- **`compound` pays the finder LAST** (checks-effects-interactions): 100% of fees are taken
+  to the vault, the 99% is reinvested, then the finder's 1% is transferred — so no external
+  call to an arbitrary caller happens before all pool-state effects settle.
+- **Documented design choices in-code:** compound dust **folds forward** into the next
+  compound (it isn't counted in shares, so it can only ever raise future NAV); the `uint128`
+  downcast in `redeem` is provably bounded by the position's own `uint128` liquidity; USDC's
+  6 decimals + blacklist behavior (a blacklisted holder's redeem reverts on the USDC leg —
+  their problem, not a solvency issue) and the deliberate absence of any approval flow.
+
+Plus **fee-accounting events for off-chain adapters** (post-audit, July 2026): `Compound`
+now emits the FULL freshly-harvested `fee0`/`fee1` alongside the finder cut, and a new
+`FeesRetained(fee0, fee1)` fires whenever `deposit`/`redeem` harvest-and-retain pool fees.
+Log-based fee accounting (e.g. a DefiLlama fees adapter) is now complete from events alone:
+realized fees = Σ `Compound.fee` + Σ `FeesRetained.fee`; keeper revenue = Σ `finder`; TVL
+needs no events (`previewRedeem(totalSupply())` + vault balances). See `AUDIT.MD` §7a.
+
+Plus **BUG-1 (found by Slither, confirmed by test, fixed):** V4 folds the position's *full*
+`feesAccrued` into `callerDelta` on **any** `modifyLiquidity`. The scaffold's `_onRedeem`
+handed the whole delta to the redeemer and `_addLiquidity` netted it into a depositor's cost —
+so the first party to touch the position after fees accrued swept **100%** of the uncompounded
+fees, defeating the compound/finder model. Fixed by splitting `callerDelta − feesAccrued`:
+the caller gets only their principal, and the fees are retained at `address(this)` (a deposit
+harvests them up front), folding forward to all holders. Only `compound()` ever pays fees out.
+
+## Core / periphery split (ZapHelper)
+
+The vault itself is a minimal **VLT + USDC → shares** LP vault — no swap, no router, no external
+reference. The `ZapHelper` is **periphery** and sits in front of it:
+
+1. `zapDeposit(usdcAmount, …)` pulls USDC and buys `swapUsdcToVlt` USDC worth of VLT from its
+   external market by executing an **off-chain-computed route** (`swapData`) against one
+   **immutable** whitelisted router (Uniswap's **Universal Router** on mainnet), bounded by
+   `minVltOut`. This is the **buy-pressure leg** (drains external VLT supply, lifts price).
+2. It deposits the bought VLT + remaining USDC into the vault via `vault.deposit(vlt, usdc,
+   minShares, deadline)` and forwards the minted shares + any dust to the caller. The `deadline`
+   (checked by the helper before the swap leg, and again by the vault) stops a stale mempool
+   transaction from executing an old route under moved market terms.
+
+Why this shape:
+- **The vault has zero external deps in its critical path.** No router, Permit2, or `swapData`
+  inside it. "Admin keys can't touch deposits" is trivially true (it references no mutable/
+  external contract). The whole MEV/routing/version-sensitive surface lives in periphery.
+- **A zapper bug can never affect the vault or existing holders** — it's just another caller
+  doing a normal deposit; the vault's invariants hold regardless.
+- **Topology changes redeploy the periphery, never the immutable vault.** Multiple zappers can
+  coexist; the vault blesses none.
+- `compound()` only reinvests vault-held tokens; `redeem()` is in-kind (no sell pressure on exit).
+
+> **Trade-off (accepted):** buy pressure is a property of the **zapper path**, not enforced by the
+> vault. A user depositing VLT+USDC directly creates none; USDC depositors (the dominant flow) go
+> through the zapper and drive it. The pitch's "oracle-free / single-venue / solvent" framing
+> applies to the vault + redeem; the zapper deliberately depends on VLT's external market.
+
+## Fee-growth APR (trailing 7d / 30d)
+
+`feeApr() → (lifetimeBps, d7Bps, d30Bps)` reports the vault's **fee** performance with VLT price
+moves stripped out. It rests on one fact: **shares ≡ liquidity (L)**, and `compound()` adds L to the
+position *without minting shares*, so **L/share rises only on a compound** — never on deposits,
+redeems, or price. It starts at exactly `1.0` on the first deposit, so `L/share − 1` is the
+price-neutral, IL-free, finder-fee-net lifetime fee growth. (USD NAV/share would conflate fees with
+the VLT price — the wrong signal for "are the fees working.")
+
+**The ring buffer.** A trailing window needs *historical* L/share, and the vault deliberately avoids
+on-chain event-log queries (unreliable across chains), so it stores the history itself:
+
+- `struct Snapshot { uint32 timestamp; uint224 perShareWad; }` packs into **one** storage word.
+  `perShareWad = positionLiquidity · 1e18 / totalSupply` — L/share as a `1e18` fixed-point **ratio**
+  (the `1e18` is precision, **not** the share `decimals()`, which is `0`). We store the *ratio*, not
+  raw L, because L/share is invariant to deposits/redeems (they scale L and supply together) and
+  moves only on compound — so it isolates fees.
+- `Snapshot[35] feeHistory` is a circular buffer. `_snapshotFeeGrowth()` runs at the **end of
+  `compound()`** and writes the post-compound L/share **at most once per UTC day** (`feeHistoryHead`
+  = newest slot; `lastSnapshotDay` dedups). The sub-$1 no-op returns before the unlock, so it never
+  snapshots — missed/ineligible days simply aren't recorded.
+
+**The view.** `feeApr()` is an endpoint (point-to-point) measurement that scans the 35 slots
+off-chain (free): for each window it finds the snapshot whose timestamp is the largest still
+`≤ now − window`, then annualizes the realized growth by the **actual** elapsed time:
+
+    bps = (perNow − perThen) / perThen × (365 days / elapsed) × 10_000      // via FullMath.mulDiv
+
+So each figure is the **average fee-growth rate over the window, simple-annualized** (not a compounded
+APY; base = the window-start L/share). It is path-independent — only the two endpoints matter, so
+intra-window lumpiness is smoothed — and *trailing*: a fresh compound lifts `perNow` so the rate jumps
+immediately, then ages out as the window slides. It reflects **compounded** fees only; pending /
+unrealized fees live in `compoundClaimable()`.
+
+**Gaps are handled; cadence sets the floor on ring size.** Because slots store real timestamps and the
+view annualizes by actual elapsed, a gap — no compound for days, or below the gate — just means the
+matched snapshot is older and the realized window is `≥` the label; never corrupted, never
+double-counted. The one constraint runs the other way: `FEE_HISTORY_LEN` must **exceed the longest
+window measured in daily-cadence days**, or under fast (≈daily) compounding the `≥30-day-old` snapshot
+the 30d window needs is evicted exactly when it's required, and the 30d figure flickers to `0`. Hence
+**35 = the 30d window + ~5 days of headroom**; sparse (real keeper) cadence is unaffected — the ring
+just spans a longer wall-clock period. A window with no snapshot old enough returns `0` (insufficient
+history → the frontend shows `—`).
+
+**Cost & trust.** Per compound: one `extsload` + at most one `SSTORE` per day (other compounds just
+read `lastSnapshotDay` and skip); the 35-slot scan is a view, free off-chain. The ring is
+**informational only** — no admin, write-once-per-day, touches no vault accounting; the only mutable
+storage on the otherwise-immutable vault is `poolKey` (constructor), `inceptionTime` (write-once on
+first deposit), and this ring. `block.timestamp` here is benign (daily granularity — nothing of value
+depends on sub-day precision) and the post-unlock snapshot is a benign reentrancy pattern
+(`nonReentrant`, flash-accounting already settled); both are suppressed at the linter with
+justifications, so Solhint/Slither stay clean.
+
+> **Read it as guidance, not a guarantee.** Short windows are cadence-dependent (sparse compounds
+> widen the realized window past the label), it excludes pending fees, and it's a backward-looking
+> average — not a forecast.
+
+## Design decisions (settled)
+
+- **Compound dust:** fold-forward (simplest; benign — strictly accretive to holders).
+- **Quoter location:** off-chain (`scripts/lib/pool.js`), used by the frontend to size the
+  ZapHelper's `swapUsdcToVlt` split + `minVltOut`. The actual route calldata (`swapData`) comes
+  from the Uniswap Routing API; for production-grade `minShares` a frontend can `callStatic` the
+  zap. The included split math (swap ≈ `D/(2−fee)`) leaves <2% dust in tests.
+- **Finder fee:** 1% hardcoded — confirm it clears harvest gas at expected fee accrual; accept
+  a lumpier compound cadence in quiet markets otherwise.
+- **Finder fee base (nuance, by design):** the 1% bounty is charged only on the fees a given
+  `compound()` call freshly harvests from the pool (`feesAccrued`), **not** on the vault's full
+  balance. Fees retained at the vault by `deposit`/`redeem` (the BUG-1 fix) and prior compound
+  dust are reinvested **100%, with no finder cut** — pure upside to holders. Consequence: the
+  finder's incentive scales with newly-accrued *pool* fees, not the retained balance. Harmless,
+  but a conscious choice (documented in `_onCompound`, flagged for the audit).
+
+## Remaining before mainnet
+
+Mapping to the completion plan's Definition of Done — what this workspace does **not** yet do:
+
+1. ~~**Slither**~~ — done: wired (`npm run slither`), all findings triaged, reports 0. Re-run
+   after any contract change.
+2. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
+   the V4 fee-settlement path (BUG-1) and that the `feesAccrued`/principal split is complete
+   across every callback; the finder-fee-base nuance (1% on freshly-harvested pool fees only;
+   retained fees reinvest with no finder cut); and the **ZapHelper / external-sourcing path**
+   (deposit's dependency on VLT's external market, the arbitrary-`swapData`-to-whitelisted-router
+   pattern, and MEV/slippage bounded by `minVltOut`).
+3. **Mainnet pool init + deploy + verify** — requires a funded key + archive RPC; the scripts
+   above are ready. Publish the vault address into the pitch's Parameters table afterward.
+
+## Notes / caveats
+
+- **Invariant harness scale:** this is a deterministic Hardhat property harness (3 seeds ×
+  ~40 ops), not Foundry's thousands-of-runs invariant engine. It asserts the same four
+  invariants but at smaller scale. A complementary Foundry `invariant_*` suite is recommended
+  pre-audit if exhaustive fuzzing is desired.
+- **Reviewed scaffold, not audited code** — do not deploy real funds before the audit.
+```

@@ -1,0 +1,37 @@
+{
+  "name": "vlt-usdc-vault",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hardhat workspace for the vltUSDC Uniswap V4 auto-compounding LP vault. Isolated from the parent jQuery/gulp frontend.",
+  "license": "MIT",
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test",
+    "test:fork": "FORK=1 hardhat test test/fork/vault.fork.test.js test/fork/zaphelper.fork.test.js",
+    "coverage": "hardhat coverage",
+    "lint:sol": "solhint 'contracts/**/*.sol'",
+    "slither": "slither . --config-file slither.config.json",
+    "node:fork": "hardhat node",
+    "fork:node": "FORK=1 hardhat node",
+    "fork:setup": "hardhat run scripts/dev/fork_all.js --network localhost",
+    "fork:fees": "hardhat run scripts/dev/generate_fees.js --network localhost",
+    "fork:simulate": "hardhat run scripts/dev/simulate_days.js --network localhost",
+    "adapters:test": "node periphery/defillama/test/run-fork.js",
+    "pool:create": "hardhat run scripts/00_create_and_init_pool.js",
+    "deploy": "hardhat run scripts/01_deploy_vault.js",
+    "seed": "hardhat run scripts/02_seed_first_deposit.js",
+    "verify:vault": "hardhat run scripts/03_verify_etherscan.js"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.17",
+    "solhint": "^6.2.3",
+    "solmate": "^6.8.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.1.0",
+    "@uniswap/v4-core": "^1.0.2",
+    "@uniswap/v4-periphery": "^1.0.2"
+  }
+}
