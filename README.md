@@ -12,11 +12,12 @@ ever touch periphery, and a zapper bug can't affect the vault or its holders. Se
 [`docs/vltUSDC-pitch.md`](docs/vltUSDC-pitch.md) for the product overview; this workspace
 implements the `vltUSDC-vault-TODO.md` completion plan.
 
-This workspace is **isolated** from the parent jQuery/gulp frontend — it has its own
-`package.json` and `node_modules`.
+This is a **standalone** Hardhat workspace; the jQuery/gulp frontend lives in the sibling
+[bankroll-web](https://github.com/bankrollnetwork/bankroll-web) repo.
 
-> **Status:** compiles, fully fork-/PoolManager-tested, and deployable on testnet. **Not yet
-> mainnet-ready** — still pending a Slither pass and the Shieldify audit (see
+> **Status:** compiles, fully fork-/PoolManager-tested (54 unit + 2 fork tests), Slither
+> clean (0 findings, 96 detectors), Solhint clean, dependencies pinned. **Not yet
+> mainnet-ready** — pending the Shieldify audit (see
 > [Remaining before mainnet](#remaining-before-mainnet)).
 
 ---
@@ -147,8 +148,51 @@ FORK=1 FORK_BLOCK_NUMBER=25217000 npx hardhat test test/fork/vault.fork.test.js 
 
 The Permit2 branch itself is also covered **deterministically (no RPC)** by
 `zaphelper.permit2.test.js` (mock Permit2 + a Permit2-pulling router), so the helper's
-production approval path doesn't rely solely on the fork run. A full deposit/redeem/compound
-cycle on a fork additionally needs the V4 VLT/USDC pool initialized + a VLT route.
+production approval path doesn't rely solely on the fork run. A full
+deposit/redeem/compound cycle additionally needs the V4 VLT/USDC pool initialized + a VLT
+route — that's the end-to-end simulation below.
+
+### Full end-to-end fork simulation (60 days)
+
+The complete lifecycle on a persistent forked node — pool creation, a zap-seeded first
+deposit through the **real Universal Router + Permit2**, then N simulated days of trading
+volume with a permissionless compound each day. This is the closest thing to production the
+suite offers: real mainnet tokens (USDC/VLT), the real PoolManager, real routing.
+
+```bash
+# .env: MAINNET_RPC_URL + FORK_BLOCK_NUMBER (pinned) + INIT_USDC_PER_VLT (pool seed price,
+#       e.g. 0.50). Optional: DEV_ACCOUNT=<your wallet> to get funded for UI testing.
+npm run fork:node        # terminal 1 — forked node on 127.0.0.1:8545 (leave running)
+npm run fork:setup       # terminal 2 — init pool, deploy vault + ZapHelper, fund DEV_ACCOUNT
+npm run fork:simulate    # seed 20k USDC via zapDeposit, then 60 days × (volume + compound)
+npm run adapters:test    # DefiLlama TVL + fees adapters against the populated fork
+```
+
+`fork:setup` writes the deployed addresses to `scripts/dev/.deployed.json` (gitignored) and
+prints them for the test client's Config panel; the later steps read that file. Knobs (env):
+`SIM_DAYS` (60), `SIM_USDC_PER_SWAP` (2000), `SIM_SEED_USDC` (20000), `FUND_ETH`/`FUND_USDC`
+for the dev account. `fork:fees` runs volume-only rounds without compounding.
+
+Expected shape of a healthy run (validated July 10, 2026): simulate reports
+`60/60 days compounded` with L/share monotonically rising (≈1.10 after 60 days at the
+default volume), and `adapters:test` shows a consistent TVL (both token legs on the right
+decimal scales), 60 decoded `Compound` events, and `✓ finder == fee/100 holds` on every one.
+
+Two fork-specific gotchas, both time-related:
+
+- **`evm_increaseTime` pushes chain time days ahead of wall clock.** Anything computing a
+  deadline from `Date.now()` will revert `"expired"` — compute deadlines from the latest
+  block's timestamp instead (the bundled test client does; `fork:simulate` uses
+  `MaxUint256`).
+- **No arbitrageurs on a fork.** The vault pool's price and VLT's external market drift
+  apart, so a naive 50/50 zap split leaves a large refund. The test client sizes the split
+  from the measured route rate and the pool's own price; expect a fat "dust" refund if you
+  zap with hand-picked splits at a large gap.
+
+To click through the UI against this fork: build + serve the sibling `bankroll-web` repo,
+point its `config.js` `window.rpcURL` at `http://127.0.0.1:8545`, and paste the vault +
+ZapHelper addresses from `fork:setup` into the test client's Config panel (your
+`DEV_ACCOUNT` wallet arrives pre-funded).
 
 ## Deploy
 
