@@ -116,6 +116,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// actually worth calling; this only filters the degenerate near-zero case.
     uint256 public constant MIN_COMPOUND_VALUE_USDC = 1e6;
 
+    /// @notice EXPERIMENT: claimable value (USDC, 6-dec) at which deposit() runs a best-effort
+    /// auto-compound before measuring the depositor's liquidity. Fixed and ungoverned, like
+    /// MIN_COMPOUND_VALUE_USDC.
+    uint256 public constant AUTO_COMPOUND_MIN_USDC = 100e6;
+
     /*//////////////////////////////////////////////////////////////
                                 IMMUTABLES
     //////////////////////////////////////////////////////////////*/
@@ -389,6 +394,17 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         // solhint-enable not-rely-on-time
         require(vltAmount > 0 && usdcAmount > 0, "zero-deposit");
 
+        // EXPERIMENT: best-effort auto-compound. Fold accrued fees into liquidity BEFORE this
+        // depositor's liquidity is measured — existing holders get the NAV bump first; the
+        // depositor buys in at the post-compound price and earns the 1% finder fee for paying
+        // the gas. Runs ahead of the retain0/1 snapshot so compound-consumed balances are never
+        // double-counted. try/catch on a self-only entrypoint: a compound failure (price bound,
+        // pool edge case) degrades to "no compound" and can never brick deposits.
+        (,, uint256 claimableUsdc,) = compoundClaimable();
+        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC) {
+            try this.autoCompound(msg.sender) {} catch {} // solhint-disable-line no-empty-blocks
+        }
+
         // Pre-existing vault balances (fees retained by prior redeems + compound dust) belong
         // to all holders, never to this depositor. Snapshot BEFORE pulling the deposit so the
         // refund leaves exactly these behind (they fold forward into the next compound).
@@ -508,6 +524,19 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         );
         liquidityAdded = abi.decode(res, (uint128));
         _snapshotFeeGrowth(); // record post-compound L/share for the trailing-APR ring (≤ once/day)
+    }
+
+    /// @notice EXPERIMENT: compound leg for deposit()'s best-effort auto-compound. Callable only
+    /// by the vault itself — deposit() already holds the reentrancy guard, so this entrypoint
+    /// carries none; the self-only gate is the access control. The threshold was checked by the
+    /// caller. `finder` (the depositor) receives the 1% finder fee.
+    function autoCompound(address finder) external returns (uint128 liquidityAdded) {
+        require(msg.sender == address(this), "self-only");
+        bytes memory res = poolManager.unlock(
+            abi.encode(Action.COMPOUND, abi.encode(CompoundData(finder)))
+        );
+        liquidityAdded = abi.decode(res, (uint128));
+        _snapshotFeeGrowth();
     }
 
     // The trailing-APR ring below intentionally uses block.timestamp for DAILY snapshot dedup and for
