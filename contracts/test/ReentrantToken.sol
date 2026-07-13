@@ -5,7 +5,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 interface IReentryTarget {
     function redeem(uint256 shares, address receiver) external returns (uint256, uint256);
-    function autoCompound(address finder) external returns (uint128);
+    function autoCompound() external returns (uint128);
 }
 
 /// @dev A hostile ERC-20 that attempts to re-enter the vault from inside a token
@@ -56,7 +56,7 @@ contract ReentrantToken is ERC20 {
             armed = false; // single-shot: fire on the first transfer after arming
             reentryAttempted = true;
             if (mode == MODE_AUTO_COMPOUND) {
-                try IReentryTarget(target).autoCompound(address(this)) {
+                try IReentryTarget(target).autoCompound() {
                     reentryReverted = false;
                 } catch (bytes memory err) {
                     reentryReverted = true;

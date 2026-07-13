@@ -259,7 +259,7 @@ describe("VltUsdcVault — core flows", () => {
   });
 
   describe("auto-compound (deposit-triggered)", () => {
-    it("a threshold-crossing deposit compounds: depositor gets the finder cut, shares mint only for the deposit", async () => {
+    it("a threshold-crossing deposit compounds: 100% reinvests (no fee), shares mint only for the deposit", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
@@ -268,10 +268,10 @@ describe("VltUsdcVault — core flows", () => {
 
       const supplyBefore = await ctx.vault.totalSupply();
       const lBefore = await ctx.vault.positionLiquidity();
-      const finderVltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
-      const finderUsdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
+      const trigVltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
+      const trigUsdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
 
-      // The finder IS the trigger depositor: a small deposit runs the compound leg first.
+      // A small deposit runs the compound leg first.
       const trigUsdc = USDC(10);
       const trigVlt = balancedVlt(ctx, trigUsdc);
       const rc = await (await triggerCompound(ctx, ctx.finder, trigUsdc)).wait();
@@ -285,14 +285,15 @@ describe("VltUsdcVault — core flows", () => {
       expect(await ctx.vault.positionLiquidity()).to.equal(
         lBefore + cmp.liquidityAdded + dep.liquidityAdded
       );
+      expect(cmp.vltFees + cmp.usdcFees).to.be.greaterThan(0n); // a real harvest happened
 
-      // Wallet delta net of the deposit's own pull/refund == the event-reported finder cut.
-      // (The helper mints exactly what the vault pulls, so delta = refund + finder.)
-      const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - finderVltBefore;
-      const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - finderUsdcBefore;
-      expect(vltDelta - (trigVlt - dep.vltUsed)).to.equal(cmp.vltFinder);
-      expect(usdcDelta - (trigUsdc - dep.usdcUsed)).to.equal(cmp.usdcFinder);
-      expect(cmp.vltFinder + cmp.usdcFinder).to.be.greaterThan(0n);
+      // NO fee of any kind: the trigger depositor's wallet delta is EXACTLY the deposit refund.
+      // (The helper mints exactly what the vault pulls, so delta = refund + any payout — and the
+      // payout must be zero.)
+      const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - trigVltBefore;
+      const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - trigUsdcBefore;
+      expect(vltDelta).to.equal(trigVlt - dep.vltUsed);
+      expect(usdcDelta).to.equal(trigUsdc - dep.usdcUsed);
     });
 
     it("a deposit below the threshold does NOT compound (no event, claimable value carries over)", async () => {
@@ -468,8 +469,8 @@ describe("VltUsdcVault — core flows", () => {
         near2(pVlt, red.vltOut);
         near2(pUsdc, red.usdcOut);
 
-        // 4. Auto-compound: the trigger depositor's per-token wallet deltas (net of the deposit's
-        //    own pull/refund) match the token-named finder cut.
+        // 4. Auto-compound: one-sided USDC volume must surface as token-named usdcFees, and the
+        //    trigger depositor receives nothing beyond the deposit's own refund (no fee).
         for (let k = 0; k < 20; k++) {
           const [, , v] = await ctx.vault.compoundClaimable();
           if (v >= USDC(120)) break;
@@ -485,8 +486,8 @@ describe("VltUsdcVault — core flows", () => {
         expect(cmp.usdcFees).to.be.greaterThan(0n);
         const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - fVlt;
         const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdc;
-        expect(vltDelta - (trigVlt - dep4.vltUsed)).to.equal(cmp.vltFinder);
-        expect(usdcDelta - (trigUsdc - dep4.usdcUsed)).to.equal(cmp.usdcFinder);
+        expect(vltDelta).to.equal(trigVlt - dep4.vltUsed);
+        expect(usdcDelta).to.equal(trigUsdc - dep4.usdcUsed);
       });
     }
   });

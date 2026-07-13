@@ -234,8 +234,7 @@ async function redeem(ctx, user, shares, receiver) {
 
 // There is NO public compound entrypoint: once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC
 // ($100), ANY deposit runs the vault's best-effort auto-compound before its own liquidity add.
-// A small deposit by `user` is the canonical trigger; the depositor doubles as the finder and
-// earns 1% of the fresh harvest in kind.
+// A small deposit by `user` is the canonical trigger; 100% of the harvest reinvests (no fee).
 async function triggerCompound(ctx, user, usdcAmount) {
   const amt = usdcAmount ?? 10n * 10n ** BigInt(ctx.cfg.usdcDecimals);
   return deposit(ctx, user, amt);

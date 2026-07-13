@@ -4,7 +4,7 @@
 // (threshold-gated `try this.autoCompound(msg.sender)` at the top of deposit()).
 // It prints "GAS <label> <gasUsed>" lines for comparison and logs whether a
 // Compound event fired inside each measured call, plus the caller's leftover
-// balances (which surface the 1% finder rebate on the prototype).
+// balances (which must now be pure deposit refunds — no fee is paid to anyone).
 //
 // No hard gas assertions — this is a measurement harness, not a regression test.
 
@@ -67,8 +67,8 @@ describe("gas: deposit-triggered auto-compound experiment", function () {
       rcpt,
       `claimableBefore=${claimable} claimableAfter=${claimAfter} compound=${compoundFired(ctx, rcpt)} dLiq=${liqAfter - liqBefore}`
     );
-    // Finder-rebate visibility: leftovers the depositor holds after refunds (baseline: refund
-    // dust only; prototype: refund dust + 1% finder fee in kind).
+    // Leftover visibility: what the depositor holds after refunds (must be refund
+    // dust only — no fee of any kind).
     console.log(
       `      LEFTOVER carol vlt=${await ctx.vlt.balanceOf(ctx.carol.address)} usdc=${await ctx.usdc.balanceOf(ctx.carol.address)}`
     );
@@ -102,7 +102,7 @@ describe("gas: deposit-triggered auto-compound experiment", function () {
     const usdcBefore = await ctx.usdc.balanceOf(ctx.bob.address);
     const rcpt = await (await zapDeposit(ctx, ctx.bob, USDC(5_000))).wait();
     logGas("trigger_zap", rcpt, `claimableBefore=${claimable} compound=${compoundFired(ctx, rcpt)}`);
-    // The helper must hold nothing afterwards; any finder rebate must have been swept to bob.
+    // The helper must hold nothing afterwards.
     console.log(
       `      LEFTOVER bob vlt=${await ctx.vlt.balanceOf(ctx.bob.address)} usdc=${(await ctx.usdc.balanceOf(ctx.bob.address)) - usdcBefore + USDC(5_000)}` // eslint-disable-line
     );

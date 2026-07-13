@@ -171,10 +171,7 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     const rcCmp = await (await triggerCompound(ctx, ctx.finder)).wait();
     const evCmp = await getEvent(ctx.vault, rcCmp, "Compound");
     const [cmpFee0, cmpFee1] = to01(evCmp.vltFees, evCmp.usdcFees);
-    const [cmpFinder0, cmpFinder1] = to01(evCmp.vltFinder, evCmp.usdcFinder);
-    near(cmpFee0, freshCmp0, 300, "Compound fees (full fresh harvest, not just the finder cut)");
+    near(cmpFee0, freshCmp0, 300, "Compound fees (full fresh harvest, currency0 side)");
     near(cmpFee1, freshCmp1, 300, "Compound fees (currency1 side)");
-    expect(cmpFinder0).to.equal(cmpFee0 / 100n); // FINDER_FEE_BPS = 1% of the emitted fee
-    expect(cmpFinder1).to.equal(cmpFee1 / 100n);
   });
 });

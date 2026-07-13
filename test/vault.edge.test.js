@@ -183,9 +183,7 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
 
     it("autoCompound cannot be called externally at all", async () => {
       const ctx = await loadFixture(deployVaultFixture);
-      await expect(
-        ctx.vault.connect(ctx.alice).autoCompound(ctx.alice.address)
-      ).to.be.revertedWith("self-only");
+      await expect(ctx.vault.connect(ctx.alice).autoCompound()).to.be.revertedWith("self-only");
     });
   });
 
@@ -207,8 +205,8 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
     });
   });
 
-  describe("finder fee is exactly 1% of harvested fees", () => {
-    it("with the vault as sole LP, the trigger depositor gets ~1% of gross fees in each currency", async () => {
+  describe("compound takes no fee — 100% of the harvest reinvests", () => {
+    it("with the vault as sole LP, the event reports the full gross fees and the depositor gets nothing extra", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
@@ -233,7 +231,7 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       const [, , armed] = await ctx.vault.compoundClaimable();
       expect(armed).to.be.greaterThanOrEqual(USDC(100)); // the trigger will fire
 
-      // The finder is the trigger depositor; net out the trigger deposit's own pull/refund.
+      // Trigger with a small deposit; net out the trigger deposit's own pull/refund.
       const trigUsdc = USDC(10);
       const trigVlt = balancedVlt(ctx, trigUsdc);
       const fVltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
@@ -241,23 +239,24 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       const rc = await (await triggerCompound(ctx, ctx.finder, trigUsdc)).wait();
       const ev = { args: findEvent(ctx.vault, rc, "Compound") };
       const dep = findEvent(ctx.vault, rc, "Deposit");
-      const vltGot =
-        (await ctx.vlt.balanceOf(ctx.finder.address)) - fVltBefore - (trigVlt - dep.vltUsed);
-      const usdcGot =
-        (await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdcBefore - (trigUsdc - dep.usdcUsed);
-      expect(vltGot).to.equal(ev.args.vltFinder); // wallet delta matches the event exactly
-      expect(usdcGot).to.equal(ev.args.usdcFinder);
 
-      // Expectations below are computed in pool (currency0/1) order from the swap inputs;
+      // NO payout of any kind: the depositor's wallet delta is exactly the deposit refund.
+      const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - fVltBefore;
+      const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdcBefore;
+      expect(vltDelta).to.equal(trigVlt - dep.vltUsed);
+      expect(usdcDelta).to.equal(trigUsdc - dep.usdcUsed);
+
+      // The event carries the FULL gross harvest per currency (nothing carved out).
+      // Expectations are computed in pool (currency0/1) order from the swap inputs;
       // the event is token-named, so map it back through the fixture's ordering.
-      const [finder0, finder1] = ctx.usdcIsCurrency0
-        ? [ev.args.usdcFinder, ev.args.vltFinder]
-        : [ev.args.vltFinder, ev.args.usdcFinder];
+      const [fee0, fee1] = ctx.usdcIsCurrency0
+        ? [ev.args.usdcFees, ev.args.vltFees]
+        : [ev.args.vltFees, ev.args.usdcFees];
 
-      // gross fee per currency = inputs * fee / 1e6 ; finder = 1% of that.
+      // gross fee per currency = inputs * fee / 1e6.
       const feePips = BigInt(ctx.cfg.fee);
-      const expFinder0 = (gross0In * feePips) / 1_000_000n / 100n;
-      const expFinder1 = (gross1In * feePips) / 1_000_000n / 100n;
+      const expFee0 = (gross0In * feePips) / 1_000_000n;
+      const expFee1 = (gross1In * feePips) / 1_000_000n;
 
       // Allow a small tolerance for V4 fee-growth rounding (per-liquidity Q128 math).
       const closeTo = (actual, expected) => {
@@ -266,8 +265,8 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
         expect(actual).to.be.greaterThan(0n);
         expect(diff * 100n).to.be.lessThanOrEqual(expected * 2n);
       };
-      closeTo(finder0, expFinder0);
-      closeTo(finder1, expFinder1);
+      closeTo(fee0, expFee0);
+      closeTo(fee1, expFee1);
     });
   });
 
