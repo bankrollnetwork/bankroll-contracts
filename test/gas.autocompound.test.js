@@ -13,7 +13,6 @@ const {
   deployVaultFixture,
   deposit,
   zapDeposit,
-  compound,
   generateFees,
   removeBaseLiquidity,
 } = require("./helpers/setup");
@@ -76,16 +75,15 @@ describe("gas: deposit-triggered auto-compound experiment", function () {
     expect(await ctx.vault.balanceOf(ctx.carol.address)).to.be.gt(0n);
   });
 
-  it("S3: keeper path — standalone compound(), then the same deposit", async function () {
+  it("S3: deposit right after a trigger (nothing left to compound)", async function () {
     const ctx = await deployVaultFixture();
     await (await deposit(ctx, ctx.alice, USDC(10_000))).wait();
     await removeBaseLiquidity(ctx);
     await accrueFeesTo(ctx, USDC(120));
-    const rcptC = await (await compound(ctx, ctx.finder)).wait();
-    logGas("keeper_compound", rcptC, `compound=${compoundFired(ctx, rcptC)}`);
+    const rcptT = await (await deposit(ctx, ctx.finder, USDC(5_000))).wait();
+    logGas("trigger_deposit_2", rcptT, `compound=${compoundFired(ctx, rcptT)}`);
     const rcptD = await (await deposit(ctx, ctx.carol, USDC(5_000))).wait();
-    logGas("post_compound_deposit", rcptD, `compound=${compoundFired(ctx, rcptD)}`);
-    console.log(`      GAS keeper_path_total ${rcptC.gasUsed + rcptD.gasUsed}`);
+    logGas("post_trigger_deposit", rcptD, `compound=${compoundFired(ctx, rcptD)}`);
   });
 
   it("S4: quiet zapDeposit (no pending fees)", async function () {

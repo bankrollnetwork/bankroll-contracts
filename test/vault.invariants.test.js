@@ -1,7 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
-const { deployVaultFixture, deposit, redeem, compound, generateFees } = require("./helpers/setup");
+const { deployVaultFixture, deposit, redeem, triggerCompound, accrueFeesTo } = require("./helpers/setup");
 
 // Deterministic PRNG (mulberry32) so failures reproduce. No Date/Math.random reliance
 // for the *sequence* — the seed fully determines the op stream.
@@ -96,10 +96,10 @@ describe("VltUsdcVault — stateful invariants", () => {
           redeems++;
           await checkInvariants(`redeem#${i}`);
         } else {
-          // compound: generate some fees then harvest. Zero-arg compound() auto-rebalances and
-          // simply no-ops (returns 0) if nothing accrued — no revert to tolerate.
-          await generateFees(ctx, { rounds: 2 });
-          await (await compound(ctx, ctx.finder)).wait();
+          // compound: accrue fees past the $100 auto-compound trigger, then fire it with a
+          // small deposit by the actor (the only compound path — no public entrypoint exists).
+          await accrueFeesTo(ctx, 120n * USDC1);
+          await (await triggerCompound(ctx, actor)).wait();
           compounds++;
           await checkInvariants(`compound#${i}`);
         }

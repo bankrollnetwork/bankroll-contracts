@@ -46,7 +46,7 @@ async function deployVaultFixture(overrides = {}) {
 
   // 2. Tokens. VLT optionally swapped for the reentrancy attacker.
   const Mock = await ethers.getContractFactory("MockERC20");
-  const usdc = await Mock.deploy("USD Coin", "USDC", cfg.usdcDecimals);
+  let usdc = await Mock.deploy("USD Coin", "USDC", cfg.usdcDecimals);
   await usdc.waitForDeployment();
 
   let vlt;
@@ -61,7 +61,13 @@ async function deployVaultFixture(overrides = {}) {
   if (cfg.forceUsdcIsCurrency0 !== undefined) {
     let tries = 0;
     while ((BigInt(usdc.target) < BigInt(vlt.target)) !== cfg.forceUsdcIsCurrency0) {
-      if (++tries > 40) throw new Error("could not force currency ordering after 40 redeploys");
+      if (++tries > 80) throw new Error("could not force currency ordering after 80 redeploys");
+      // An extreme USDC address can strand the loop (nearly every fresh address sorts on one
+      // side of it) — periodically redeploy USDC too, moving the reference point.
+      if (tries % 8 === 0) {
+        usdc = await Mock.deploy("USD Coin", "USDC", cfg.usdcDecimals);
+        await usdc.waitForDeployment();
+      }
       vlt = await VltFactory.deploy("Vault", "VLT", cfg.vltDecimals);
       await vlt.waitForDeployment();
     }
@@ -226,9 +232,29 @@ async function redeem(ctx, user, shares, receiver) {
   return ctx.vault.connect(user).redeem(BigInt(shares), receiver ?? user.address);
 }
 
-// compound() is now zero-arg: it auto-rebalances internally and no-ops below the min-value gate.
-async function compound(ctx, caller) {
-  return ctx.vault.connect(caller).compound();
+// There is NO public compound entrypoint: once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC
+// ($100), ANY deposit runs the vault's best-effort auto-compound before its own liquidity add.
+// A small deposit by `user` is the canonical trigger; the depositor doubles as the finder and
+// earns 1% of the fresh harvest in kind.
+async function triggerCompound(ctx, user, usdcAmount) {
+  const amt = usdcAmount ?? 10n * 10n ** BigInt(ctx.cfg.usdcDecimals);
+  return deposit(ctx, user, amt);
+}
+
+// Push balanced volume until compoundClaimable() reports at least `targetUsdc` (raw 6d) — the
+// robust way to arm the auto-compound threshold without hand-tuning swap counts per fixture.
+async function accrueFeesTo(ctx, targetUsdc, { rounds = 5, usdcPerSwap } = {}) {
+  const per = usdcPerSwap ?? 2000n * 10n ** BigInt(ctx.cfg.usdcDecimals);
+  for (let i = 0; i < 10; i++) {
+    const [, , valueUsdc] = await ctx.vault.compoundClaimable();
+    if (valueUsdc >= targetUsdc) return valueUsdc;
+    await generateFees(ctx, { rounds, usdcPerSwap: per });
+  }
+  const [, , valueUsdc] = await ctx.vault.compoundClaimable();
+  if (valueUsdc < targetUsdc) {
+    throw new Error(`accrueFeesTo: wanted ${targetUsdc}, got ${valueUsdc}`);
+  }
+  return valueUsdc;
 }
 
 // Push trade volume through the pool so fees accrue to the vault's position.
@@ -311,7 +337,8 @@ module.exports = {
   deposit,
   zapDeposit,
   redeem,
-  compound,
+  triggerCompound,
+  accrueFeesTo,
   generateFees,
   swapExact,
   removeBaseLiquidity,

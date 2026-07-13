@@ -5,7 +5,8 @@ const {
   fundUsdc,
   deposit,
   redeem,
-  compound,
+  triggerCompound,
+  accrueFeesTo,
   swapExact,
   removeBaseLiquidity,
 } = require("./helpers/setup");
@@ -89,11 +90,11 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     expect(await ctx.vault.balanceOf(ctx.bob.address)).to.be.greaterThan(0n);
   });
 
-  it("retained fees fold forward: a later compound reinvests them into liquidity", async () => {
+  it("retained fees fold forward: a later triggering deposit reinvests them into liquidity", async () => {
     const ctx = await loadFixture(deployVaultFixture);
     await fundUsdc(ctx, ctx.alice, USDC(50000));
     await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
-    const { c0Token, c1Token } = await setupWithFees(ctx);
+    await setupWithFees(ctx);
 
     // Loose vault value in USDC terms (VLT marked at the ~2 USDC reference).
     const vaultValue = async () => {
@@ -109,10 +110,10 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     expect(valueBefore).to.be.greaterThan(0n);
 
     const lBefore = await ctx.vault.positionLiquidity();
-    // Generate a little more volume so compound has fresh fees to harvest, then compound.
-    const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
-    await (await swapExact(ctx, ctx.seeder, true, 50n * 10n ** BigInt(c0Dec))).wait();
-    await (await compound(ctx, ctx.finder)).wait();
+    // Accrue fresh fees up to the auto-compound trigger, then fire it with a small deposit.
+    // (The retained balances + fresh fees all reinvest in the same compound leg.)
+    await accrueFeesTo(ctx, USDC(120));
+    await (await triggerCompound(ctx, ctx.finder)).wait();
 
     // The retained fees were reinvested: loose vault value drops sharply and liquidity grew.
     // (Reinvest is ratio-limited so a dust remainder of the heavy side folds to next time.)
@@ -152,14 +153,27 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     near(depFee0, freshDep0, 300, "deposit FeesRetained (currency0 side)");
     expect(depFee1).to.equal(0n); // one-directional volume: no currency1 fees accrued
 
-    // 3. More volume, then Compound reports the FULL fresh harvest with the 1% cut carved from it.
-    await (await swapExact(ctx, ctx.seeder, true, in0)).wait();
-    const freshCmp0 = (in0 * BigInt(ctx.cfg.fee)) / 1_000_000n;
-    const rcCmp = await (await compound(ctx, ctx.finder)).wait();
+    // 3. More volume (both directions, tallied) until the $100 trigger arms; the next deposit's
+    //    Compound event must report the FULL fresh harvest with the 1% cut carved from it.
+    const c1Dec = ctx.usdcIsCurrency0 ? ctx.cfg.vltDecimals : ctx.cfg.usdcDecimals;
+    const big0 = 2000n * 10n ** BigInt(c0Dec);
+    const big1 = 2000n * 10n ** BigInt(c1Dec);
+    let freshCmp0 = 0n;
+    let freshCmp1 = 0n;
+    for (let k = 0; k < 20; k++) {
+      const [, , v] = await ctx.vault.compoundClaimable();
+      if (v >= USDC(120)) break;
+      await (await swapExact(ctx, ctx.seeder, true, big0)).wait();
+      freshCmp0 += (big0 * BigInt(ctx.cfg.fee)) / 1_000_000n;
+      await (await swapExact(ctx, ctx.seeder, false, big1)).wait();
+      freshCmp1 += (big1 * BigInt(ctx.cfg.fee)) / 1_000_000n;
+    }
+    const rcCmp = await (await triggerCompound(ctx, ctx.finder)).wait();
     const evCmp = await getEvent(ctx.vault, rcCmp, "Compound");
     const [cmpFee0, cmpFee1] = to01(evCmp.vltFees, evCmp.usdcFees);
     const [cmpFinder0, cmpFinder1] = to01(evCmp.vltFinder, evCmp.usdcFinder);
     near(cmpFee0, freshCmp0, 300, "Compound fees (full fresh harvest, not just the finder cut)");
+    near(cmpFee1, freshCmp1, 300, "Compound fees (currency1 side)");
     expect(cmpFinder0).to.equal(cmpFee0 / 100n); // FINDER_FEE_BPS = 1% of the emitted fee
     expect(cmpFinder1).to.equal(cmpFee1 / 100n);
   });

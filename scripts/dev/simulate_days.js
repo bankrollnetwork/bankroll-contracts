@@ -1,7 +1,9 @@
 // DEV ONLY. Simulate N days of fee accrual + daily compounding against the running fork, so the
-// vault's L/share ring buffer fills and feeApr() reports real 7d / 30d numbers. Each "day" it:
-//   1. round-trips USDC↔VLT through the pool until ≥ $2 is claimable (balanced — no price drift),
-//   2. calls compound() (the keeper) → writes one daily snapshot,
+// vault's L/share ring buffer fills and feeApr() reports real 7d / 30d numbers. There is no
+// public compound() — a deposit whose claimable value is ≥ AUTO_COMPOUND_MIN_USDC ($100) runs
+// the compound leg itself. Each "day" the script:
+//   1. round-trips USDC↔VLT through the pool until ≥ $110 is claimable (balanced — no drift),
+//   2. makes a small zapDeposit — the trigger deposit compounds + writes one daily snapshot,
 //   3. advances the EVM clock by 1 day.
 //
 // If the vault hasn't been funded yet (totalSupply == 0) it FIRST seeds a deposit through the
@@ -12,9 +14,9 @@
 //   npm run fork:setup       # terminal 2  (deploys + writes scripts/dev/.deployed.json)
 //   npm run fork:simulate    # terminal 2  (default 60 days; auto-seeds if needed)
 //
-// Env: SIM_DAYS (60), SIM_USDC_PER_SWAP (2000), SIM_TARGET_USD (2 — claimable to hit before
-//      compounding), SIM_SEED_USDC (20000 — first-deposit size if the vault is empty),
-//      VAULT / ZAP (override the addresses from .deployed.json).
+// Env: SIM_DAYS (60), SIM_USDC_PER_SWAP (2000), SIM_TARGET_USD (110 — claimable to hit before
+//      the trigger deposit; must clear the $100 auto-compound constant), SIM_SEED_USDC (20000 —
+//      first-deposit size if the vault is empty), VAULT / ZAP (addresses from .deployed.json).
 const fs = require("fs");
 const path = require("path");
 const { AbiCoder, Interface, solidityPacked } = require("ethers");
@@ -80,10 +82,10 @@ function readDeployed() {
 async function main() {
   const cfg = resolveConfig(hre.network.name);
   const { poolKey, usdcIsCurrency0 } = buildPoolKey(cfg.vlt, cfg.usdc, cfg.fee, cfg.tickSpacing);
-  const [keeper] = await ethers.getSigners(); // anyone can compound; account #0 is the keeper here
+  const [keeper] = await ethers.getSigners(); // account #0 drives volume + the daily trigger deposit
   const days = Number(process.env.SIM_DAYS || 60);
   const usdcPerSwap = ethers.parseUnits(process.env.SIM_USDC_PER_SWAP || "2000", 6);
-  const targetRaw = ethers.parseUnits(process.env.SIM_TARGET_USD || "2", 6);
+  const targetRaw = ethers.parseUnits(process.env.SIM_TARGET_USD || "110", 6);
   const seedUsdc = ethers.parseUnits(process.env.SIM_SEED_USDC || "20000", 6);
 
   const dep = readDeployed();
@@ -97,12 +99,15 @@ async function main() {
   const usdc = await ethers.getContractAt("IERC20", cfg.usdc);
   const vlt = await ethers.getContractAt("IERC20", cfg.vlt);
 
+  // The ZapHelper is required throughout: it seeds an empty vault AND makes the daily
+  // trigger deposits (the only way to fire the vault's auto-compound with USDC only).
+  if (!dep.zapHelper) {
+    throw new Error("no ZapHelper address — run `npm run fork:setup` or pass ZAP=0x…");
+  }
+  const zap = await ethers.getContractAt("ZapHelper", dep.zapHelper);
+
   // Seed the first deposit if the vault is empty — via the ZapHelper (USDC-only; buys VLT externally).
   if ((await vault.totalSupply()) === 0n) {
-    if (!dep.zapHelper) {
-      throw new Error("vault is empty and no ZapHelper address — run `npm run fork:setup` or pass ZAP=0x…");
-    }
-    const zap = await ethers.getContractAt("ZapHelper", dep.zapHelper);
     const swapAmt = seedUsdc / 2n; // ~half the value swapped to VLT; the vault refunds any dust
     console.log(
       `Vault empty — seeding first deposit via ZapHelper: ${ethers.formatUnits(seedUsdc, 6)} USDC ` +
@@ -144,18 +149,34 @@ async function main() {
   };
 
   console.log(
-    `Simulating ${days} days on ${cfg.networkName} (round-trip ${ethers.formatUnits(usdcPerSwap, 6)} USDC until ≥ $${ethers.formatUnits(targetRaw, 6)} claimable, then compound)…`
+    `Simulating ${days} days on ${cfg.networkName} (round-trip ${ethers.formatUnits(usdcPerSwap, 6)} USDC until ≥ $${ethers.formatUnits(targetRaw, 6)} claimable, then a trigger deposit)…`
   );
+  // Daily trigger deposit: a small USDC-only zapDeposit whose vault.deposit() leg auto-compounds.
+  const triggerUsdc = ethers.parseUnits("20", 6);
+  await (await usdc.approve(dep.zapHelper, ethers.MaxUint256)).wait();
+  const compoundTopic = vault.interface.getEvent("Compound").topicHash;
   let compounded = 0;
   for (let d = 0; d < days; d++) {
     let guard = 0;
-    // accrue fees until the day clears the compound gate (cap to avoid a runaway if the pool is thin)
+    // accrue fees until the day clears the auto-compound trigger (cap to avoid a runaway)
     while (guard++ < 25 && (await vault.compoundClaimable()).valueUsdc < targetRaw) {
       await roundTrip();
     }
-    const added = await vault.compound.staticCall();
-    await (await vault.compound()).wait();
-    if (added > 0n) compounded++;
+    const rcTrig = await (
+      await zap.zapDeposit(
+        triggerUsdc,
+        triggerUsdc / 2n,
+        0n,
+        0n,
+        ethers.MaxUint256,
+        keeper.address,
+        buildSwapData(cfg.usdc, cfg.vlt, triggerUsdc / 2n)
+      )
+    ).wait();
+    const fired = rcTrig.logs.some(
+      (l) => l.address.toLowerCase() === dep.vault.toLowerCase() && l.topics[0] === compoundTopic
+    );
+    if (fired) compounded++;
     await ethers.provider.send("evm_increaseTime", [DAY]);
     await ethers.provider.send("evm_mine", []);
     process.stdout.write(`  day ${d + 1}/${days}  (compounds: ${compounded})   \r`);

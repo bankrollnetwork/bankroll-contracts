@@ -17,10 +17,16 @@ pragma solidity 0.8.26;
         external market (the buy-pressure leg) and then calling deposit().
       - redeem(shares): burn shares, remove pro-rata liquidity, return BOTH
         tokens in-kind (no auto-sell). Solvent by construction.
-      - compound(): permissionless. Collect fees, pay caller 1% of each token
-        as a finder's fee, reinvest the remaining 99% as liquidity. Mints NO
-        shares, so L grows against a fixed share supply => every holder's
-        redemption value rises automatically.
+      - Auto-compound: deposit() triggers a best-effort compound (self-call in
+        a try/catch) once the claimable value reaches AUTO_COMPOUND_MIN_USDC.
+        Fees are collected, the triggering depositor earns 1% of the fresh
+        harvest as a finder's fee (a gas rebate), and the rest reinvests as
+        liquidity. Mints NO shares, so L grows against a fixed share supply
+        => every holder's redemption value rises automatically. There is NO
+        public compound entrypoint and no keeper: compounding rides on deposit
+        flow. Quiet markets merely defer reinvestment — deposit/redeem already
+        retain accrued fees for all holders, so staleness is value-neutral and
+        everything folds forward into the next triggering deposit.
 
     STATUS: `_liquidityForAmounts` is now wired to v4-periphery's canonical
     LiquidityAmounts library (was a revert placeholder). The scaffold-level
@@ -66,7 +72,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // Fully ownerless / immutable: no admin, no pause, no sweep. Every parameter is fixed at deploy
-// or a constant; deposit/redeem/compound are permissionless and self-regulating.
+// or a constant; deposit/redeem are permissionless and compounding is deposit-triggered.
 contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
@@ -77,8 +83,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                                 CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Finder's fee paid to the caller of compound(), in basis points (1% = 100).
-    /// Hardcoded by design: no admin can touch the bounty (minimal trust surface).
+    /// @dev Finder's fee paid to the depositor whose deposit triggers the auto-compound, in basis
+    /// points (1% = 100) of the fresh harvest — a gas rebate. Hardcoded by design: no admin can
+    /// touch the bounty (minimal trust surface).
     uint256 public constant FINDER_FEE_BPS = 100;
     uint256 internal constant BPS = 10_000;
 
@@ -106,19 +113,15 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// executes at the prevailing spot price, so without a cap a price-manipulator could expose the
     /// vault's FULL accumulated retained balance to a skewed price in one compound; with it, the
     /// worst-case skewed notional is a small multiple of what just accrued (which is also what the
-    /// keeper's bounty is based on). Imbalance beyond the cap folds forward across compounds — under
+    /// finder's rebate is based on). Imbalance beyond the cap folds forward across compounds — under
     /// steady fee accrual a 4× multiple works down any realistic retained imbalance in a few calls.
     uint256 internal constant REBALANCE_CAP_MULT = 4;
 
-    /// @notice Total claimable value (USDC, 6-dec) compound() requires before it runs; below this
-    /// it no-ops. A fixed, ungoverned $1 dust floor — no admin setter, so it can never be used to
-    /// disable compounding. Keeper economics (the 1% finder fee vs gas) self-regulate when it's
-    /// actually worth calling; this only filters the degenerate near-zero case.
-    uint256 public constant MIN_COMPOUND_VALUE_USDC = 1e6;
-
-    /// @notice EXPERIMENT: claimable value (USDC, 6-dec) at which deposit() runs a best-effort
-    /// auto-compound before measuring the depositor's liquidity. Fixed and ungoverned, like
-    /// MIN_COMPOUND_VALUE_USDC.
+    /// @notice Claimable value (USDC, 6-dec) at which deposit() runs its best-effort auto-compound
+    /// before measuring the depositor's liquidity. A fixed, ungoverned constant — no admin setter,
+    /// so it can never be used to disable compounding. Set so the triggering depositor's 1% finder
+    /// rebate is meaningful against the compound's gas; below it, fees and retained balances simply
+    /// keep folding forward at zero cost to holders.
     uint256 public constant AUTO_COMPOUND_MIN_USDC = 100e6;
 
     /*//////////////////////////////////////////////////////////////
@@ -215,7 +218,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     );
 
     /// @dev `vltFees`/`usdcFees` are the FULL pool fees this compound freshly harvested (raw);
-    /// `vltFinder`/`usdcFinder` are the 1% carved from them for the caller. Emitted so log-based
+    /// `vltFinder`/`usdcFinder` are the 1% carved from them for the finder (the depositor whose
+    /// deposit triggered the auto-compound). Emitted so log-based
     /// fee accounting (explorers, Dune, a DefiLlama fees adapter) can attribute realized pool fees
     /// without view-call archaeology: total realized fees = Σ Compound fees + Σ FeesRetained fees;
     /// supply-side share = that total minus Σ finder amounts.
@@ -233,6 +237,12 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// split). Without this event those harvests are invisible in the logs, and event-based fee
     /// accounting would systematically under-report between compounds.
     event FeesRetained(uint256 vltFees, uint256 usdcFees);
+
+    /// @dev A threshold-crossing deposit's best-effort auto-compound reverted and was skipped (the
+    /// deposit itself proceeded normally). The claimable value stays put and retries on the next
+    /// triggering deposit. With no public compound entrypoint there is no keeper to notice a
+    /// breakage, so a persistent stream of these is THE monitoring signal to investigate.
+    event AutoCompoundFailed();
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -290,16 +300,16 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         liq = poolManager.getPositionLiquidity(poolKey.toId(), positionKey);
     }
 
-    /// @notice What the next compound() would reinvest, computed WITHOUT touching the position:
+    /// @notice What the next auto-compound would reinvest, computed WITHOUT touching the position:
     /// the vault's retained balances (deposit/redeem-retained fees + prior dust) PLUS the position's
-    /// pending uncompounded pool fees, per currency, valued in USDC at the spot price. compound()
-    /// gates on `valueUsdc` (no-op below `MIN_COMPOUND_VALUE_USDC`); the UI shows the balance and uses
-    /// `feesValueUsdc` to size the keeper's profit (finder fee = FINDER_FEE_BPS of the fee value).
+    /// pending uncompounded pool fees, per currency, valued in USDC at the spot price. deposit()
+    /// gates on `valueUsdc` (auto-compound runs at `AUTO_COMPOUND_MIN_USDC`); the UI shows the
+    /// balance and uses `feesValueUsdc` to size the depositor's rebate.
     /// @return vltAmount claimable VLT (raw 18d): retained balance + pending fees.
     /// @return usdcAmount claimable USDC (raw 6d): retained balance + pending fees.
     /// @return valueUsdc total claimable value in USDC (6-dec raw): retained + fees. Gate input.
     /// @return feesValueUsdc value in USDC (6-dec raw) of the PENDING POOL FEES only — the finder
-    /// fee (the keeper's revenue) is FINDER_FEE_BPS of this, NOT of `valueUsdc`.
+    /// fee (the triggering depositor's rebate) is FINDER_FEE_BPS of this, NOT of `valueUsdc`.
     function compoundClaimable()
         public
         view
@@ -394,15 +404,15 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         // solhint-enable not-rely-on-time
         require(vltAmount > 0 && usdcAmount > 0, "zero-deposit");
 
-        // EXPERIMENT: best-effort auto-compound. Fold accrued fees into liquidity BEFORE this
-        // depositor's liquidity is measured — existing holders get the NAV bump first; the
-        // depositor buys in at the post-compound price and earns the 1% finder fee for paying
-        // the gas. Runs ahead of the retain0/1 snapshot so compound-consumed balances are never
-        // double-counted. try/catch on a self-only entrypoint: a compound failure (price bound,
-        // pool edge case) degrades to "no compound" and can never brick deposits.
+        // Best-effort auto-compound: fold accrued fees into liquidity BEFORE this depositor's
+        // liquidity is measured — existing holders get the NAV bump first; the depositor buys in
+        // at the post-compound price and earns the 1% finder fee for paying the gas. Runs ahead
+        // of the retain0/1 snapshot so compound-consumed balances are never double-counted.
+        // try/catch on the self-only entrypoint: a compound failure (price bound, pool edge case)
+        // degrades to "no compound this deposit" and can never brick deposits.
         (,, uint256 claimableUsdc,) = compoundClaimable();
         if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC) {
-            try this.autoCompound(msg.sender) {} catch {} // solhint-disable-line no-empty-blocks
+            try this.autoCompound(msg.sender) {} catch { emit AutoCompoundFailed(); }
         }
 
         // Pre-existing vault balances (fees retained by prior redeems + compound dust) belong
@@ -501,42 +511,30 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                                  COMPOUND
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Permissionless, zero-argument auto-compound. Harvests pool fees, internally
-    /// rebalances against the vault's OWN pool (swapping ~half the value-imbalance, input-capped
-    /// to REBALANCE_CAP_MULT × this harvest's fresh fees and bounded to a ≤5% price move — the
-    /// capped/unfilled remainder folds forward), reinvests everything (harvested fees + retained
-    /// balances) minus the caller's 1% finder fee, and mints NO shares (NAV/share rises).
-    /// @dev No-op (returns 0, no state change, no revert) when the total claimable value is below
-    /// `MIN_COMPOUND_VALUE_USDC` — checked cheaply via compoundClaimable() BEFORE unlocking, so
-    /// dust-sized fees never trigger an uneconomic compound. The rebalance is foolproof without any
-    /// caller input: the swap is small, runs in the vault's own pool (it largely pays the fee to
-    /// itself as LP), and is hard-bounded by sqrtPriceLimitX96 — sandwiching it is unprofitable.
-    function compound() external nonReentrant returns (uint128 liquidityAdded) {
-        (,, uint256 valueUsdc,) = compoundClaimable();
-        // slither-disable-next-line incorrect-equality
-        if (valueUsdc < MIN_COMPOUND_VALUE_USDC) return 0;
-
-        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: nonReentrant, the V4
-        // flash-accounting is fully settled by now, and the writes are informational only.
-        // slither-disable-next-line reentrancy-benign
-        bytes memory res = poolManager.unlock(
-            abi.encode(Action.COMPOUND, abi.encode(CompoundData(msg.sender)))
-        );
-        liquidityAdded = abi.decode(res, (uint128));
-        _snapshotFeeGrowth(); // record post-compound L/share for the trailing-APR ring (≤ once/day)
-    }
-
-    /// @notice EXPERIMENT: compound leg for deposit()'s best-effort auto-compound. Callable only
-    /// by the vault itself — deposit() already holds the reentrancy guard, so this entrypoint
-    /// carries none; the self-only gate is the access control. The threshold was checked by the
-    /// caller. `finder` (the depositor) receives the 1% finder fee.
+    /// @notice The vault's only compound path, reached exclusively as deposit()'s best-effort
+    /// self-call — there is NO public compound entrypoint and no keeper. Harvests pool fees,
+    /// internally rebalances against the vault's OWN pool (swapping ~half the value-imbalance,
+    /// input-capped to REBALANCE_CAP_MULT × this harvest's fresh fees and bounded to a ≤5% price
+    /// move — the capped/unfilled remainder folds forward), reinvests everything (harvested fees +
+    /// retained balances) minus the finder's 1%, and mints NO shares (NAV/share rises).
+    /// @dev Callable only by the vault itself: deposit() already holds the reentrancy guard, so
+    /// this entrypoint carries none — the self-only gate is the access control, and the threshold
+    /// (`AUTO_COMPOUND_MIN_USDC`) was checked by deposit() before the call. The rebalance is
+    /// foolproof without caller input: the swap is small, runs in the vault's own pool (it largely
+    /// pays the fee to itself as LP), and is hard-bounded by sqrtPriceLimitX96 — sandwiching it is
+    /// unprofitable.
+    /// @param finder The triggering depositor; paid FINDER_FEE_BPS of the fresh harvest in kind.
     function autoCompound(address finder) external returns (uint128 liquidityAdded) {
         require(msg.sender == address(this), "self-only");
+        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: the calling deposit
+        // holds the guard, the V4 flash-accounting is fully settled by now, and the writes are
+        // informational only.
+        // slither-disable-next-line reentrancy-benign
         bytes memory res = poolManager.unlock(
             abi.encode(Action.COMPOUND, abi.encode(CompoundData(finder)))
         );
         liquidityAdded = abi.decode(res, (uint128));
-        _snapshotFeeGrowth();
+        _snapshotFeeGrowth(); // record post-compound L/share for the trailing-APR ring (≤ once/day)
     }
 
     // The trailing-APR ring below intentionally uses block.timestamp for DAILY snapshot dedup and for
@@ -804,8 +802,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
 
         // 6. Pay the finder LAST, from the vault's own balance (interactions after effects).
         //    Reinvesting only (bal - finderCut) above guarantees the post-settle balance still
-        //    covers this transfer on the normal path. A keeper who quotes a rebalance swap that
-        //    sells off its own finder cut would simply revert its own tx (self-inflicted).
+        //    covers this transfer on the normal path (the rebalance is argument-free, so no caller
+        //    can engineer a shortfall; a pathological one would only revert this compound leg,
+        //    which deposit()'s try/catch absorbs).
         if (finder0 > 0) IERC20(Currency.unwrap(currency0)).safeTransfer(c.finder, finder0);
         if (finder1 > 0) IERC20(Currency.unwrap(currency1)).safeTransfer(c.finder, finder1);
 

@@ -7,7 +7,8 @@ const {
   fundUsdc,
   deposit,
   redeem,
-  compound,
+  triggerCompound,
+  accrueFeesTo,
   generateFees,
   swapExact,
 } = require("./helpers/setup");
@@ -29,6 +30,17 @@ async function getEvent(vault, receipt, name) {
     } catch (_) {}
   }
   throw new Error(`event ${name} not found`);
+}
+
+// Non-throwing presence check (getEvent throws when absent).
+function hasEvent(vault, receipt, name) {
+  for (const log of receipt.logs) {
+    try {
+      const parsed = vault.interface.parseLog(log);
+      if (parsed && parsed.name === name) return true;
+    } catch (_) {}
+  }
+  return false;
 }
 
 const DAY = 24 * 60 * 60;
@@ -246,62 +258,81 @@ describe("VltUsdcVault — core flows", () => {
     });
   });
 
-  describe("compound", () => {
-    it("pays the finder, mints NO shares, and grows liquidity", async () => {
+  describe("auto-compound (deposit-triggered)", () => {
+    it("a threshold-crossing deposit compounds: depositor gets the finder cut, shares mint only for the deposit", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
 
-      await generateFees(ctx, { rounds: 6 });
+      await accrueFeesTo(ctx, USDC(120));
 
       const supplyBefore = await ctx.vault.totalSupply();
       const lBefore = await ctx.vault.positionLiquidity();
       const finderVltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
       const finderUsdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
 
-      const rc = await (await compound(ctx, ctx.finder)).wait();
-      const { vltFinder, usdcFinder, liquidityAdded } = await getEvent(ctx.vault, rc, "Compound");
+      // The finder IS the trigger depositor: a small deposit runs the compound leg first.
+      const trigUsdc = USDC(10);
+      const trigVlt = balancedVlt(ctx, trigUsdc);
+      const rc = await (await triggerCompound(ctx, ctx.finder, trigUsdc)).wait();
+      const cmp = await getEvent(ctx.vault, rc, "Compound");
+      const dep = await getEvent(ctx.vault, rc, "Deposit");
 
-      // No new shares — the whole point: NAV/share rises.
-      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore);
-      // Liquidity grew.
-      expect(liquidityAdded).to.be.greaterThan(0n);
-      expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
+      // The compound leg minted NO shares — supply grew only by the deposit's own mint.
+      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore + dep.sharesOut);
+      // Liquidity grew by exactly the two legs: fees reinvested + the deposit's own add.
+      expect(cmp.liquidityAdded).to.be.greaterThan(0n);
+      expect(await ctx.vault.positionLiquidity()).to.equal(
+        lBefore + cmp.liquidityAdded + dep.liquidityAdded
+      );
 
-      // Finder actually received the event-reported cut in each token.
-      expect((await ctx.vlt.balanceOf(ctx.finder.address)) - finderVltBefore).to.equal(vltFinder);
-      expect((await ctx.usdc.balanceOf(ctx.finder.address)) - finderUsdcBefore).to.equal(usdcFinder);
-      expect(vltFinder + usdcFinder).to.be.greaterThan(0n);
+      // Wallet delta net of the deposit's own pull/refund == the event-reported finder cut.
+      // (The helper mints exactly what the vault pulls, so delta = refund + finder.)
+      const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - finderVltBefore;
+      const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - finderUsdcBefore;
+      expect(vltDelta - (trigVlt - dep.vltUsed)).to.equal(cmp.vltFinder);
+      expect(usdcDelta - (trigUsdc - dep.usdcUsed)).to.equal(cmp.usdcFinder);
+      expect(cmp.vltFinder + cmp.usdcFinder).to.be.greaterThan(0n);
     });
 
-    it("is a no-op (returns 0, no state change) when nothing has accrued", async () => {
+    it("a deposit below the threshold does NOT compound (no event, claimable value carries over)", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(10000));
       await (await deposit(ctx, ctx.alice, USDC(10000))).wait();
-      // No fees generated → nothing claimable → compound returns 0 without reverting or changing state.
-      const lBefore = await ctx.vault.positionLiquidity();
-      const supplyBefore = await ctx.vault.totalSupply();
-      expect(await ctx.vault.connect(ctx.finder).compound.staticCall()).to.equal(0n);
-      await (await compound(ctx, ctx.finder)).wait();
-      expect(await ctx.vault.positionLiquidity()).to.equal(lBefore);
-      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore);
+
+      // A little volume: claimable lands between the $0 floor and the $100 trigger.
+      await generateFees(ctx, { rounds: 2, usdcPerSwap: USDC(500) });
+      const [, , before] = await ctx.vault.compoundClaimable();
+      expect(before).to.be.greaterThan(0n);
+      expect(before).to.be.lessThan(USDC(100));
+
+      const rc = await (await deposit(ctx, ctx.bob, USDC(5000))).wait();
+      expect(hasEvent(ctx.vault, rc, "Compound")).to.equal(false);
+
+      // The deposit converts pending fees to retained balance but the total claimable value
+      // is preserved (same amounts, same spot price) — nothing was reinvested or paid out.
+      const [, , after] = await ctx.vault.compoundClaimable();
+      const diff = after > before ? after - before : before - after;
+      expect(diff).to.be.lessThanOrEqual(2n);
     });
 
     it("auto-rebalances ONE-SIDED fees into liquidity with no caller args", async () => {
       // Fees accrue almost entirely on currency0 (one-direction volume). WITHOUT the internal
       // rebalance swap, getLiquidityForAmounts(amount0, ~0) = 0 → a one-sided harvest adds ZERO
-      // liquidity. So liquidityAdded > 0 here is direct proof the internal rebalance ran.
+      // liquidity. So the Compound leg's liquidityAdded > 0 is direct proof the rebalance ran.
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
 
       const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
-      for (let k = 0; k < 6; k++) {
+      for (let k = 0; k < 20; k++) {
+        const [, , v] = await ctx.vault.compoundClaimable();
+        if (v >= USDC(120)) break;
         await (await swapExact(ctx, ctx.seeder, true, 2000n * 10n ** BigInt(c0Dec))).wait();
       }
 
       const lBefore = await ctx.vault.positionLiquidity();
-      const rc = await (await compound(ctx, ctx.finder)).wait();
+      const rc = await (await triggerCompound(ctx, ctx.finder)).wait();
       const { liquidityAdded } = await getEvent(ctx.vault, rc, "Compound");
       expect(liquidityAdded).to.be.greaterThan(0n);
       expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
@@ -312,72 +343,84 @@ describe("VltUsdcVault — core flows", () => {
       await fundUsdc(ctx, ctx.alice, USDC(10000));
       await (await deposit(ctx, ctx.alice, USDC(10000))).wait();
 
-      // Donate one-sided USDC straight to the vault (over the $1 gate) with NO fresh pool fees.
-      const donation = USDC(50);
+      // Donate one-sided USDC straight to the vault (over the $100 trigger) with NO fresh fees.
+      const donation = USDC(150);
       await (await ctx.usdc.mint(ctx.vault.target, donation)).wait();
 
-      // The gate passes (claimable ≥ $1) but this harvest collects ~0 fees, so the rebalance cap
-      // (REBALANCE_CAP_MULT × fresh fees) is 0: the vault must never trade held balances at spot
-      // without freshly-accrued fees sizing the swap. One-sided → nothing can be placed either.
-      expect(await ctx.vault.connect(ctx.finder).compound.staticCall()).to.equal(0n);
-      await (await compound(ctx, ctx.finder)).wait();
-      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.equal(donation); // untouched, folds forward
+      // The next deposit triggers the compound leg, but this harvest collects ~0 fees, so the
+      // rebalance cap (REBALANCE_CAP_MULT × fresh fees) is 0: the vault must never trade held
+      // balances at spot without freshly-accrued fees sizing the swap. One-sided → nothing can
+      // be placed either, so the leg runs but reinvests nothing and the donation folds forward.
+      const rc = await (await triggerCompound(ctx, ctx.bob)).wait();
+      const cmp = await getEvent(ctx.vault, rc, "Compound");
+      expect(cmp.liquidityAdded).to.equal(0n);
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.equal(donation); // untouched
       expect(await ctx.vlt.balanceOf(ctx.vault.target)).to.equal(0n); // no swap happened
 
       // Once fresh fees exist the (fee-scaled) rebalance runs and the donation starts folding in.
       await generateFees(ctx, { rounds: 4 });
       const lBefore = await ctx.vault.positionLiquidity();
-      await (await compound(ctx, ctx.finder)).wait();
+      await (await triggerCompound(ctx, ctx.bob)).wait();
       expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(donation);
     });
 
-    it("min-value gate is a fixed $1 constant with no setter (ungoverned)", async () => {
+    it("trigger threshold is a fixed $100 constant, no setter, and no public compound exists", async () => {
       const ctx = await loadFixture(deployVaultFixture);
-      expect(await ctx.vault.MIN_COMPOUND_VALUE_USDC()).to.equal(USDC(1));
-      // No setter exists — the gate can never be changed (immutable, no DoS lever).
-      const hasSetter = ctx.vault.interface.fragments.some(
-        (f) => f.type === "function" && f.name === "setMinCompoundValue"
-      );
-      expect(hasSetter).to.equal(false);
+      expect(await ctx.vault.AUTO_COMPOUND_MIN_USDC()).to.equal(USDC(100));
+      const fns = ctx.vault.interface.fragments
+        .filter((f) => f.type === "function")
+        .map((f) => f.name);
+      // No public compound entrypoint — compounding rides exclusively on deposits.
+      expect(fns).to.not.include("compound");
+      // No setter of any kind — the trigger can never be moved (no DoS / governance lever).
+      expect(fns.some((n) => n.startsWith("set"))).to.equal(false);
     });
 
-    it("keeps NAV/share monotonic even when the price is pushed before compound", async () => {
+    it("keeps NAV/share monotonic even when the price is pushed before the trigger", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
-      await generateFees(ctx, { rounds: 4 });
+      await accrueFeesTo(ctx, USDC(120));
 
-      const supply = await ctx.vault.totalSupply();
+      const aliceShares = await ctx.vault.balanceOf(ctx.alice.address);
+      const supplyBefore = await ctx.vault.totalSupply();
       const lBefore = await ctx.vault.positionLiquidity();
+      const navBefore = (lBefore * aliceShares) / supplyBefore;
 
       // Attacker front-runs with a large one-way swap to push the pool price hard.
       const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
       await (await swapExact(ctx, ctx.seeder, true, 200000n * 10n ** BigInt(c0Dec))).wait();
 
-      await (await compound(ctx, ctx.finder)).wait();
+      const rc = await (await triggerCompound(ctx, ctx.finder)).wait();
+      expect(hasEvent(ctx.vault, rc, "Compound")).to.equal(true);
 
+      // Existing-holder NAV (liquidity claim) never drops: the compound leg only adds L against
+      // a flat supply, and the trigger deposit mints pro-rata (rounded down, in holders' favor).
       const lAfter = await ctx.vault.positionLiquidity();
-      expect(await ctx.vault.totalSupply()).to.equal(supply); // no shares minted
-      expect(lAfter).to.be.greaterThanOrEqual(lBefore); // compound only adds — NAV/share never drops
+      const supplyAfter = await ctx.vault.totalSupply();
+      const navAfter = (lAfter * aliceShares) / supplyAfter;
+      expect(navAfter).to.be.greaterThanOrEqual(navBefore);
     });
 
-    it("compound never decreases a holder's redemption value (NAV/share monotonic)", async () => {
+    it("auto-compound never decreases a holder's redemption value (NAV/share monotonic)", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
 
-      const shares = await ctx.vault.balanceOf(ctx.alice.address);
-      const supply = await ctx.vault.totalSupply();
+      const aliceShares = await ctx.vault.balanceOf(ctx.alice.address);
+      const supplyBefore = await ctx.vault.totalSupply();
       const lBefore = await ctx.vault.positionLiquidity();
-      const navBefore = (lBefore * shares) / supply; // liquidity claim per holder
+      const navBefore = (lBefore * aliceShares) / supplyBefore;
 
-      await generateFees(ctx, { rounds: 6 });
-      await (await compound(ctx, ctx.finder)).wait();
+      await accrueFeesTo(ctx, USDC(120));
+      const rc = await (await triggerCompound(ctx, ctx.finder)).wait();
+      expect(hasEvent(ctx.vault, rc, "Compound")).to.equal(true);
 
       const lAfter = await ctx.vault.positionLiquidity();
-      const navAfter = (lAfter * shares) / supply;
-      expect(navAfter).to.be.greaterThanOrEqual(navBefore);
-      expect(lAfter).to.be.greaterThan(lBefore);
+      const supplyAfter = await ctx.vault.totalSupply();
+      const navAfter = (lAfter * aliceShares) / supplyAfter;
+      expect(navAfter).to.be.greaterThan(navBefore); // fees reinvested → strictly richer claim
     });
   });
 
@@ -425,15 +468,25 @@ describe("VltUsdcVault — core flows", () => {
         near2(pVlt, red.vltOut);
         near2(pUsdc, red.usdcOut);
 
-        // 4. Compound: the finder's per-token wallet deltas match the token-named finder cut.
-        await (await swapExact(ctx, ctx.seeder, ctx.usdcIsCurrency0, USDC(500))).wait();
+        // 4. Auto-compound: the trigger depositor's per-token wallet deltas (net of the deposit's
+        //    own pull/refund) match the token-named finder cut.
+        for (let k = 0; k < 20; k++) {
+          const [, , v] = await ctx.vault.compoundClaimable();
+          if (v >= USDC(120)) break;
+          await (await swapExact(ctx, ctx.seeder, ctx.usdcIsCurrency0, USDC(2000))).wait();
+        }
         const fVlt = await ctx.vlt.balanceOf(ctx.finder.address);
         const fUsdc = await ctx.usdc.balanceOf(ctx.finder.address);
-        const rcCmp = await (await compound(ctx, ctx.finder)).wait();
+        const trigUsdc = USDC(10);
+        const trigVlt = balancedVlt(ctx, trigUsdc);
+        const rcCmp = await (await triggerCompound(ctx, ctx.finder, trigUsdc)).wait();
         const cmp = await getEvent(ctx.vault, rcCmp, "Compound");
+        const dep4 = await getEvent(ctx.vault, rcCmp, "Deposit");
         expect(cmp.usdcFees).to.be.greaterThan(0n);
-        expect((await ctx.vlt.balanceOf(ctx.finder.address)) - fVlt).to.equal(cmp.vltFinder);
-        expect((await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdc).to.equal(cmp.usdcFinder);
+        const vltDelta = (await ctx.vlt.balanceOf(ctx.finder.address)) - fVlt;
+        const usdcDelta = (await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdc;
+        expect(vltDelta - (trigVlt - dep4.vltUsed)).to.equal(cmp.vltFinder);
+        expect(usdcDelta - (trigUsdc - dep4.usdcUsed)).to.equal(cmp.usdcFinder);
       });
     }
   });
@@ -442,6 +495,23 @@ describe("VltUsdcVault — core flows", () => {
 describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
   const WAD = 10n ** 18n;
 
+  // Price-neutral fee accrual to the auto-compound trigger: round-trip bursts until claimable
+  // crosses `targetUsdc` (feeBurst returns the price to ~start, so multi-day loops don't drift).
+  async function feeBurstTo(ctx, targetUsdc) {
+    for (let i = 0; i < 15; i++) {
+      const [, , v] = await ctx.vault.compoundClaimable();
+      if (v >= targetUsdc) return;
+      await feeBurst(ctx, 2);
+    }
+    throw new Error("feeBurstTo: could not accrue enough fees");
+  }
+
+  // Arm the threshold and fire it with a small trigger deposit (carol is the daily depositor).
+  async function dailyCompound(ctx) {
+    await feeBurstTo(ctx, USDC(120));
+    await (await triggerCompound(ctx, ctx.carol)).wait();
+  }
+
   it("snapshots L/share at most once per UTC day, into the ring", async () => {
     const ctx = await loadFixture(deployVaultFixture);
     await fundUsdc(ctx, ctx.alice, USDC(50000));
@@ -449,9 +519,9 @@ describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
 
     expect(await ctx.vault.lastSnapshotDay()).to.equal(0n); // nothing recorded before any compound
 
-    // First compound → writes slot 0 with a post-compound L/share > 1.0.
-    await feeBurst(ctx, 4);
-    await (await compound(ctx, ctx.finder)).wait();
+    // First triggering deposit → writes slot 0 with a post-compound L/share > 1.0. (The snapshot
+    // runs inside the compound leg, BEFORE the trigger deposit's own liquidity add.)
+    await dailyCompound(ctx);
     const day1 = await ctx.vault.lastSnapshotDay();
     expect(day1).to.be.greaterThan(0n);
     expect(await ctx.vault.feeHistoryHead()).to.equal(0n);
@@ -459,16 +529,14 @@ describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
     expect(s0.timestamp).to.be.greaterThan(0n);
     expect(s0.perShareWad).to.be.greaterThan(WAD);
 
-    // Second compound the SAME day → no new slot, head and day unchanged.
-    await feeBurst(ctx, 4);
-    await (await compound(ctx, ctx.finder)).wait();
+    // Second triggering deposit the SAME day → no new slot, head and day unchanged.
+    await dailyCompound(ctx);
     expect(await ctx.vault.feeHistoryHead()).to.equal(0n);
     expect(await ctx.vault.lastSnapshotDay()).to.equal(day1);
 
-    // A new day → next compound advances the head to slot 1.
+    // A new day → the next triggering deposit advances the head to slot 1.
     await time.increase(DAY);
-    await feeBurst(ctx, 4);
-    await (await compound(ctx, ctx.finder)).wait();
+    await dailyCompound(ctx);
     expect(await ctx.vault.feeHistoryHead()).to.equal(1n);
     expect(await ctx.vault.lastSnapshotDay()).to.be.greaterThan(day1);
   });
@@ -478,10 +546,9 @@ describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
     await fundUsdc(ctx, ctx.alice, USDC(50000));
     await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
 
-    // 37 daily compounds: head walks 0..34 then wraps → (37-1) % 35 = 1.
+    // 37 daily triggering deposits: head walks 0..34 then wraps → (37-1) % 35 = 1.
     for (let d = 0; d < 37; d++) {
-      await feeBurst(ctx, 3);
-      await (await compound(ctx, ctx.finder)).wait();
+      await dailyCompound(ctx);
       await time.increase(DAY);
     }
     expect(await ctx.vault.feeHistoryHead()).to.equal(1n);
@@ -500,10 +567,9 @@ describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
     expect(apr.d7Bps).to.equal(0n);
     expect(apr.d30Bps).to.equal(0n);
 
-    // ~10 days, one compound per day.
+    // ~10 days, one triggering deposit per day.
     for (let d = 0; d < 10; d++) {
-      await feeBurst(ctx, 4);
-      await (await compound(ctx, ctx.finder)).wait();
+      await dailyCompound(ctx);
       await time.increase(DAY);
     }
 
@@ -514,17 +580,16 @@ describe("VltUsdcVault — fee-growth ring + trailing APR", () => {
   });
 
   it("30d window stays serviceable under daily compounding (ring headroom)", async () => {
-    // 33 daily compounds, then query WITHOUT a trailing time bump (now ≈ the newest snapshot). The
-    // ≥30-day-old snapshot the 30d window needs must still be retained — this fails at LEN == 30
-    // (the boundary slot is evicted) and passes only with the headroom (LEN = 35).
+    // 33 daily triggering deposits, then query WITHOUT a trailing time bump (now ≈ the newest
+    // snapshot). The ≥30-day-old snapshot the 30d window needs must still be retained — this
+    // fails at LEN == 30 (the boundary slot is evicted) and passes only with headroom (LEN = 35).
     const ctx = await loadFixture(deployVaultFixture);
     await fundUsdc(ctx, ctx.alice, USDC(50000));
     await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
 
     for (let d = 0; d < 33; d++) {
       if (d > 0) await time.increase(DAY); // advance BEFORE compounding so no trailing time bump
-      await feeBurst(ctx, 3);
-      await (await compound(ctx, ctx.finder)).wait();
+      await dailyCompound(ctx);
     }
     const apr = await ctx.vault.feeApr();
     expect(apr.d30Bps).to.be.greaterThan(0n);

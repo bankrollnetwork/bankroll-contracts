@@ -6,14 +6,24 @@ const {
   fundUsdc,
   deposit,
   redeem,
-  compound,
-  generateFees,
+  triggerCompound,
+  accrueFeesTo,
   swapExact,
   removeBaseLiquidity,
   balancedVlt,
 } = require("./helpers/setup");
 
 const USDC = (n) => BigInt(Math.round(n * 1e6));
+
+function findEvent(vault, receipt, name) {
+  for (const log of receipt.logs) {
+    try {
+      const parsed = vault.interface.parseLog(log);
+      if (parsed && parsed.name === name) return parsed.args;
+    } catch (_) {}
+  }
+  return null;
+}
 
 // Named fixture (loadFixture rejects anonymous functions) that swaps VLT for the
 // hostile reentrant token.
@@ -79,7 +89,7 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
   });
 
   describe("first-deposit inflation attack", () => {
-    it("a direct token donation cannot inflate share price or zero out the next depositor", async () => {
+    it("a donation is socialized by the auto-compound; the next depositor still gets fair, non-zero shares", async () => {
       const ctx = await loadFixture(deployVaultFixture);
 
       // Attacker makes the (valid) first deposit.
@@ -96,36 +106,42 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       await (await ctx.usdc.connect(ctx.alice).transfer(ctx.vault.target, USDC(1_000_000))).wait();
       await (await ctx.vlt.connect(ctx.alice).transfer(ctx.vault.target, 10n ** 24n)).wait();
 
-      // Donation does NOT touch the pool position — shares track ΔL at the pool, not balances.
+      // The donation sits inert (shares track ΔL at the pool) until a deposit triggers the
+      // auto-compound — which reinvests it for the holders existing BEFORE the victim enters.
       expect(await ctx.vault.positionLiquidity()).to.equal(liqBefore);
 
-      // Victim deposits; must receive fair, non-zero shares per the exact ΔL formula.
+      // Victim deposits: the compound leg socializes the donation first (no shares minted for
+      // it), then the victim's shares mint at the post-compound price per the exact ΔL formula.
+      // Fewer shares than pre-donation, but each is proportionally richer — value-fair, and the
+      // attacker recovers nothing: the donation went to the pre-victim holders (largely the
+      // locked dead shares on a fresh vault), making inflation griefing a money-loser.
       await fundUsdc(ctx, ctx.bob, USDC(1000));
       const rc = await (await deposit(ctx, ctx.bob, USDC(1000))).wait();
-      const ev = ctx.vault.interface.parseLog(
-        rc.logs.find((l) => {
-          try {
-            return ctx.vault.interface.parseLog(l)?.name === "Deposit";
-          } catch {
-            return false;
-          }
-        })
-      );
-      const liquidityAdded = ev.args.liquidityAdded;
-      const expectedShares = (supplyBefore * liquidityAdded) / liqBefore;
+      const cmp = findEvent(ctx.vault, rc, "Compound");
+      const dep = findEvent(ctx.vault, rc, "Deposit");
+      expect(cmp.liquidityAdded).to.be.greaterThan(0n); // the balanced part of the donation reinvested
 
+      const lAtMint = liqBefore + cmp.liquidityAdded;
+      const expectedShares = (supplyBefore * dep.liquidityAdded) / lAtMint;
       const bobShares = await ctx.vault.balanceOf(ctx.bob.address);
       expect(bobShares).to.equal(expectedShares);
       expect(bobShares).to.be.greaterThan(0n);
+      // Only the victim's own mint grew the supply — the donation minted nobody shares.
+      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore + dep.sharesOut);
+
+      // Value-fairness: the victim's redeemable claim is worth ~their own $2,000 deposit
+      // ($1,000 USDC + $1,000 in VLT) — they neither capture the donation nor pay for it.
+      const [pVlt, pUsdc] = await ctx.vault.previewRedeem(bobShares);
+      const valueUsdc = pUsdc + (pVlt * 2n) / 10n ** 12n; // VLT at the ~2 USDC/VLT reference
+      expect(valueUsdc).to.be.greaterThan((USDC(2000) * 97n) / 100n);
+      expect(valueUsdc).to.be.lessThan((USDC(2000) * 103n) / 100n);
     });
   });
 
-  describe("reentrancy", () => {
-    it("blocks reentry from a hostile token mid-deposit (ReentrancyGuardReentrantCall)", async () => {
-      const ctx = await loadFixture(reentrantFixture);
-
-      // Fund + approve BEFORE arming, so the first armed VLT movement is the deposit's own
-      // transferFrom (inside the nonReentrant deposit), not a setup mint.
+  describe("reentrancy & the self-only compound gate", () => {
+    // Fund + approve BEFORE arming, so the first armed VLT movement is the deposit's own
+    // transferFrom (inside the nonReentrant deposit), not a setup mint.
+    async function armedDeposit(ctx, mode) {
       const usdcAmt = USDC(10000);
       const vltAmt = balancedVlt(ctx, usdcAmt);
       await (await ctx.usdc.mint(ctx.alice.address, usdcAmt)).wait();
@@ -134,19 +150,42 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       await (await ctx.vlt.connect(ctx.alice).approve(ctx.vault.target, ethers.MaxUint256)).wait();
 
       await (await ctx.vlt.setTarget(ctx.vault.target)).wait();
+      await (await ctx.vlt.setMode(mode)).wait();
       await (await ctx.vlt.arm(true)).wait();
 
-      // The deposit's VLT transferFrom triggers a reentrant compound() while nonReentrant is held.
       await (
         await ctx.vault.connect(ctx.alice).deposit(vltAmt, usdcAmt, 0, ethers.MaxUint256, ctx.alice.address)
       ).wait();
-
       expect(await ctx.vlt.reentryAttempted()).to.equal(true);
       expect(await ctx.vlt.reentryReverted()).to.equal(true);
+      return ctx.vlt.lastError();
+    }
 
+    it("blocks reentry from a hostile token mid-deposit (ReentrancyGuardReentrantCall)", async () => {
+      const ctx = await loadFixture(reentrantFixture);
+      // The deposit's VLT transferFrom triggers a reentrant redeem() while nonReentrant is held.
+      const lastError = await armedDeposit(ctx, 0 /* MODE_REDEEM */);
       const selector = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
-      const lastError = await ctx.vlt.lastError();
       expect(lastError.slice(0, 10)).to.equal(selector);
+    });
+
+    it("a hostile token calling autoCompound mid-deposit hits the self-only gate", async () => {
+      const ctx = await loadFixture(reentrantFixture);
+      const lastError = await armedDeposit(ctx, 1 /* MODE_AUTO_COMPOUND */);
+      const errorSelector = ethers.id("Error(string)").slice(0, 10);
+      expect(lastError.slice(0, 10)).to.equal(errorSelector);
+      const [reason] = ethers.AbiCoder.defaultAbiCoder().decode(
+        ["string"],
+        ethers.dataSlice(lastError, 4)
+      );
+      expect(reason).to.equal("self-only");
+    });
+
+    it("autoCompound cannot be called externally at all", async () => {
+      const ctx = await loadFixture(deployVaultFixture);
+      await expect(
+        ctx.vault.connect(ctx.alice).autoCompound(ctx.alice.address)
+      ).to.be.revertedWith("self-only");
     });
   });
 
@@ -169,18 +208,19 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
   });
 
   describe("finder fee is exactly 1% of harvested fees", () => {
-    it("with the vault as sole LP, finder gets ~1% of gross fees in each currency", async () => {
+    it("with the vault as sole LP, the trigger depositor gets ~1% of gross fees in each currency", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
       // Remove the baseline LP so 100% of subsequent swap fees accrue to the vault.
       await removeBaseLiquidity(ctx);
 
-      // Drive known volume in both directions and tally gross input per currency.
+      // Drive known volume in both directions (enough to arm the $100 auto-compound trigger)
+      // and tally gross input per currency.
       const c0Decimals = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
       const c1Decimals = ctx.usdcIsCurrency0 ? ctx.cfg.vltDecimals : ctx.cfg.usdcDecimals;
-      const in0 = 200n * 10n ** BigInt(c0Decimals); // small vs vault depth, but enough to clear the $1 gate
-      const in1 = 200n * 10n ** BigInt(c1Decimals);
+      const in0 = 2000n * 10n ** BigInt(c0Decimals);
+      const in1 = 2000n * 10n ** BigInt(c1Decimals);
 
       let gross0In = 0n;
       let gross1In = 0n;
@@ -190,17 +230,24 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
         await (await swapExact(ctx, ctx.seeder, false, in1)).wait(); // currency1 in
         gross1In += in1;
       }
+      const [, , armed] = await ctx.vault.compoundClaimable();
+      expect(armed).to.be.greaterThanOrEqual(USDC(100)); // the trigger will fire
 
-      const rc = await (await compound(ctx, ctx.finder)).wait();
-      const ev = ctx.vault.interface.parseLog(
-        rc.logs.find((l) => {
-          try {
-            return ctx.vault.interface.parseLog(l)?.name === "Compound";
-          } catch {
-            return false;
-          }
-        })
-      );
+      // The finder is the trigger depositor; net out the trigger deposit's own pull/refund.
+      const trigUsdc = USDC(10);
+      const trigVlt = balancedVlt(ctx, trigUsdc);
+      const fVltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
+      const fUsdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
+      const rc = await (await triggerCompound(ctx, ctx.finder, trigUsdc)).wait();
+      const ev = { args: findEvent(ctx.vault, rc, "Compound") };
+      const dep = findEvent(ctx.vault, rc, "Deposit");
+      const vltGot =
+        (await ctx.vlt.balanceOf(ctx.finder.address)) - fVltBefore - (trigVlt - dep.vltUsed);
+      const usdcGot =
+        (await ctx.usdc.balanceOf(ctx.finder.address)) - fUsdcBefore - (trigUsdc - dep.usdcUsed);
+      expect(vltGot).to.equal(ev.args.vltFinder); // wallet delta matches the event exactly
+      expect(usdcGot).to.equal(ev.args.usdcFinder);
+
       // Expectations below are computed in pool (currency0/1) order from the swap inputs;
       // the event is token-named, so map it back through the fixture's ordering.
       const [finder0, finder1] = ctx.usdcIsCurrency0
@@ -235,15 +282,16 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       expect(fns).to.not.include("transferOwnership");
     });
 
-    it("deposit + compound have no admin gate — always callable (no pause)", async () => {
+    it("deposit has no admin gate and carries the auto-compound — always callable (no pause)", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(50000));
       await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
-      await generateFees(ctx, { rounds: 4 });
+      await accrueFeesTo(ctx, USDC(120));
 
+      // Any depositor triggers the compound — no keeper, no role, no pause anywhere.
       await fundUsdc(ctx, ctx.bob, USDC(1000));
-      await expect(deposit(ctx, ctx.bob, USDC(1000))).to.not.be.reverted;
-      await expect(compound(ctx, ctx.finder)).to.not.be.reverted;
+      const rc = await (await deposit(ctx, ctx.bob, USDC(1000))).wait();
+      expect(findEvent(ctx.vault, rc, "Compound")).to.not.equal(null);
 
       const shares = await ctx.vault.balanceOf(ctx.alice.address);
       await expect(redeem(ctx, ctx.alice, shares / 2n)).to.not.be.reverted;

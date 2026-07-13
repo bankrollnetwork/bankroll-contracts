@@ -4,18 +4,24 @@ pragma solidity 0.8.26;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 interface IReentryTarget {
-    function compound() external returns (uint128);
+    function redeem(uint256 shares, address receiver) external returns (uint256, uint256);
+    function autoCompound(address finder) external returns (uint128);
 }
 
 /// @dev A hostile ERC-20 that attempts to re-enter the vault from inside a token
-/// transfer (the ERC-777-style hook surface). Used to prove the `nonReentrant`
-/// guard blocks reentry: while the vault is mid-unlock-callback, any vault token
-/// movement fires a reentrant `compound()` which must revert. We capture the
-/// revert data so the test can assert it is exactly ReentrancyGuardReentrantCall().
+/// transfer (the ERC-777-style hook surface). Used to prove both re-entry defenses:
+/// while the vault is mid-deposit, any vault token movement fires (per `mode`) either
+/// a reentrant `redeem()` — which must revert with ReentrancyGuardReentrantCall() —
+/// or a direct `autoCompound()` — which must revert on the self-only gate. We capture
+/// the revert data so the test can assert the exact error.
 contract ReentrantToken is ERC20 {
+    uint8 public constant MODE_REDEEM = 0;
+    uint8 public constant MODE_AUTO_COMPOUND = 1;
+
     uint8 private immutable _decimals;
     address public target;
     bool public armed;
+    uint8 public mode;
     bool public reentryAttempted;
     bool public reentryReverted;
     bytes public lastError;
@@ -36,6 +42,10 @@ contract ReentrantToken is ERC20 {
         target = t;
     }
 
+    function setMode(uint8 m) external {
+        mode = m;
+    }
+
     function arm(bool a) external {
         armed = a;
     }
@@ -45,11 +55,20 @@ contract ReentrantToken is ERC20 {
         if (armed && target != address(0)) {
             armed = false; // single-shot: fire on the first transfer after arming
             reentryAttempted = true;
-            try IReentryTarget(target).compound() {
-                reentryReverted = false;
-            } catch (bytes memory err) {
-                reentryReverted = true;
-                lastError = err;
+            if (mode == MODE_AUTO_COMPOUND) {
+                try IReentryTarget(target).autoCompound(address(this)) {
+                    reentryReverted = false;
+                } catch (bytes memory err) {
+                    reentryReverted = true;
+                    lastError = err;
+                }
+            } else {
+                try IReentryTarget(target).redeem(1, address(this)) {
+                    reentryReverted = false;
+                } catch (bytes memory err) {
+                    reentryReverted = true;
+                    lastError = err;
+                }
             }
         }
     }
