@@ -366,14 +366,15 @@ describe("VltUsdcVault — core flows", () => {
       expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(donation);
     });
 
-    it("trigger threshold is a fixed $100 constant, no setter, and no public compound exists", async () => {
+    it("trigger threshold is a fixed $100 constant with no setter", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       expect(await ctx.vault.AUTO_COMPOUND_MIN_USDC()).to.equal(USDC(100));
       const fns = ctx.vault.interface.fragments
         .filter((f) => f.type === "function")
         .map((f) => f.name);
-      // No public compound entrypoint — compounding rides exclusively on deposits.
-      expect(fns).to.not.include("compound");
+      // compound() is public (unincentivized safety valve); deposits are the primary trigger.
+      expect(fns).to.include("compound");
+      expect(fns).to.not.include("autoCompound");
       // No setter of any kind — the trigger can never be moved (no DoS / governance lever).
       expect(fns.some((n) => n.startsWith("set"))).to.equal(false);
     });

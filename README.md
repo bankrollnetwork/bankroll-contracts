@@ -366,11 +366,12 @@ justifications, so Solhint/Slither stay clean.
   ZapHelper's `swapUsdcToVlt` split + `minVltOut`. The actual route calldata (`swapData`) comes
   from the Uniswap Routing API; for production-grade `minShares` a frontend can `callStatic` the
   zap. The included split math (swap ≈ `D/(2−fee)`) leaves <2% dust in tests.
-- **No keeper:** compounding is deposit-triggered only (no public `compound()`). Once claimable
-  value reaches `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) the next deposit runs the
-  compound leg best-effort (try/catch, `AutoCompoundFailed` on a swallowed revert) before its own
-  liquidity is measured. Quiet markets defer reinvestment — value-neutral, since deposit/redeem
-  already retain accrued fees for all holders.
+- **No keeper:** compounding is deposit-triggered. Once claimable value reaches
+  `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) the next deposit runs `compound()`
+  best-effort (try/catch, `AutoCompoundFailed` on a swallowed revert) before its own liquidity
+  is measured. `compound()` itself is public but unincentivized — anyone may reinvest for
+  holders in a quiet market at their own gas cost. Staleness is value-neutral either way, since
+  deposit/redeem already retain accrued fees for all holders.
 - **No compound fee:** 100% of every harvest (fresh pool fees + retained balances + prior
   dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
   depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile

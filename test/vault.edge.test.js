@@ -138,7 +138,7 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
     });
   });
 
-  describe("reentrancy & the self-only compound gate", () => {
+  describe("reentrancy", () => {
     // Fund + approve BEFORE arming, so the first armed VLT movement is the deposit's own
     // transferFrom (inside the nonReentrant deposit), not a setup mint.
     async function armedDeposit(ctx, mode) {
@@ -169,21 +169,31 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       expect(lastError.slice(0, 10)).to.equal(selector);
     });
 
-    it("a hostile token calling autoCompound mid-deposit hits the self-only gate", async () => {
+    it("a hostile token calling compound() mid-deposit is blocked by the guard too", async () => {
       const ctx = await loadFixture(reentrantFixture);
-      const lastError = await armedDeposit(ctx, 1 /* MODE_AUTO_COMPOUND */);
-      const errorSelector = ethers.id("Error(string)").slice(0, 10);
-      expect(lastError.slice(0, 10)).to.equal(errorSelector);
-      const [reason] = ethers.AbiCoder.defaultAbiCoder().decode(
-        ["string"],
-        ethers.dataSlice(lastError, 4)
-      );
-      expect(reason).to.equal("self-only");
+      const lastError = await armedDeposit(ctx, 1 /* MODE_COMPOUND */);
+      const selector = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
+      expect(lastError.slice(0, 10)).to.equal(selector);
     });
 
-    it("autoCompound cannot be called externally at all", async () => {
+    it("compound() is public and permissionless: any outsider can reinvest for holders", async () => {
       const ctx = await loadFixture(deployVaultFixture);
-      await expect(ctx.vault.connect(ctx.alice).autoCompound()).to.be.revertedWith("self-only");
+      await fundUsdc(ctx, ctx.alice, USDC(50000));
+      await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
+      await accrueFeesTo(ctx, USDC(120));
+
+      const lBefore = await ctx.vault.positionLiquidity();
+      const supplyBefore = await ctx.vault.totalSupply();
+      const vltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
+      const usdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
+
+      // The finder signer holds no shares and gets no reward — a pure gas donation.
+      const rc = await (await ctx.vault.connect(ctx.finder).compound()).wait();
+      expect(findEvent(ctx.vault, rc, "Compound")).to.not.equal(null);
+      expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
+      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore); // no shares minted
+      expect(await ctx.vlt.balanceOf(ctx.finder.address)).to.equal(vltBefore); // no payout
+      expect(await ctx.usdc.balanceOf(ctx.finder.address)).to.equal(usdcBefore);
     });
   });
 

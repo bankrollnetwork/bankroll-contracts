@@ -17,17 +17,17 @@ pragma solidity 0.8.26;
         external market (the buy-pressure leg) and then calling deposit().
       - redeem(shares): burn shares, remove pro-rata liquidity, return BOTH
         tokens in-kind (no auto-sell). Solvent by construction.
-      - Auto-compound: deposit() triggers a best-effort compound (self-call in
-        a try/catch) once the claimable value reaches AUTO_COMPOUND_MIN_USDC.
+      - Auto-compound: deposit() triggers a best-effort compound() (self-call
+        in a try/catch) once the claimable value reaches AUTO_COMPOUND_MIN_USDC.
         Fees are collected and 100% reinvests as liquidity — NO fee of any kind
         is taken. Mints NO shares, so L grows against a fixed share supply
-        => every holder's redemption value rises automatically. There is NO
-        public compound entrypoint and no keeper: compounding rides on deposit
-        flow, and a failing compound leg can never brick deposits (it is
-        skipped with an AutoCompoundFailed event). Quiet markets merely defer
-        reinvestment — deposit/redeem already retain accrued fees for all
-        holders, so staleness is value-neutral and everything folds forward
-        into the next triggering deposit.
+        => every holder's redemption value rises automatically. compound() is
+        public but UNINCENTIVIZED (no keeper economics, no bounty): deposits
+        trigger it automatically, and anyone may call it directly in a quiet
+        market. A failing compound leg can never brick deposits (it is skipped
+        with an AutoCompoundFailed event). Staleness is value-neutral —
+        deposit/redeem already retain accrued fees for all holders, and
+        everything folds forward into the next compound.
 
     STATUS: `_liquidityForAmounts` is now wired to v4-periphery's canonical
     LiquidityAmounts library (was a revert placeholder). The scaffold-level
@@ -230,8 +230,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
 
     /// @dev A threshold-crossing deposit's best-effort auto-compound reverted and was skipped (the
     /// deposit itself proceeded normally). The claimable value stays put and retries on the next
-    /// triggering deposit. With no public compound entrypoint there is no keeper to notice a
-    /// breakage, so a persistent stream of these is THE monitoring signal to investigate.
+    /// triggering deposit. A persistent stream of these is the monitoring signal to investigate —
+    /// a direct compound() call will then surface the underlying revert loudly.
     event AutoCompoundFailed();
 
     /*//////////////////////////////////////////////////////////////
@@ -384,7 +384,30 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         uint256 minShares,
         uint256 deadline,
         address recipient
-    ) external nonReentrant returns (uint256 shares) {
+    ) external returns (uint256 shares) {
+        // Best-effort auto-compound: fold accrued fees into liquidity BEFORE this depositor's
+        // liquidity is measured — existing holders get the NAV bump first; the depositor buys in
+        // at the post-compound price. It runs in this UNGUARDED wrapper because compound() is
+        // nonReentrant and _deposit() below takes the same lock — a self-call made while holding
+        // it would always revert into the catch and silently never compound. try/catch keeps the
+        // leg best-effort: a compound failure (price bound, pool edge case) degrades to "no
+        // compound this deposit" and can never brick deposits.
+        (,, uint256 claimableUsdc,) = compoundClaimable();
+        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC) {
+            try this.compound() {} catch { emit AutoCompoundFailed(); }
+        }
+        return _deposit(vltAmount, usdcAmount, minShares, deadline, recipient);
+    }
+
+    /// @dev Guarded body of deposit(). Runs after the wrapper's auto-compound leg, so the
+    /// retain0/1 snapshot below never double-counts compound-consumed balances.
+    function _deposit(
+        uint256 vltAmount,
+        uint256 usdcAmount,
+        uint256 minShares,
+        uint256 deadline,
+        address recipient
+    ) internal nonReentrant returns (uint256 shares) {
         require(recipient != address(0), "zero-recipient");
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
         // solhint-disable not-rely-on-time
@@ -392,17 +415,6 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         require(block.timestamp <= deadline, "expired");
         // solhint-enable not-rely-on-time
         require(vltAmount > 0 && usdcAmount > 0, "zero-deposit");
-
-        // Best-effort auto-compound: fold accrued fees into liquidity BEFORE this depositor's
-        // liquidity is measured — existing holders get the NAV bump first; the depositor buys in
-        // at the post-compound price. Runs ahead of the retain0/1 snapshot so compound-consumed
-        // balances are never double-counted. try/catch on the self-only entrypoint: a compound
-        // failure (price bound, pool edge case) degrades to "no compound this deposit" and can
-        // never brick deposits.
-        (,, uint256 claimableUsdc,) = compoundClaimable();
-        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC) {
-            try this.autoCompound() {} catch { emit AutoCompoundFailed(); }
-        }
 
         // Pre-existing vault balances (fees retained by prior redeems + compound dust) belong
         // to all holders, never to this depositor. Snapshot BEFORE pulling the deposit so the
@@ -500,23 +512,22 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                                  COMPOUND
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The vault's only compound path, reached exclusively as deposit()'s best-effort
-    /// self-call — there is NO public compound entrypoint and no keeper. Harvests pool fees,
+    /// @notice Compound the vault's accrued value into position liquidity: harvests pool fees,
     /// internally rebalances against the vault's OWN pool (swapping ~half the value-imbalance,
     /// input-capped to REBALANCE_CAP_MULT × this harvest's fresh fees and bounded to a ≤5% price
     /// move — the capped/unfilled remainder folds forward), and reinvests everything (harvested
     /// fees + retained balances) with NO fee of any kind, minting NO shares (NAV/share rises).
-    /// @dev External only so deposit() can wrap it in try/catch (Solidity's try needs an external
-    /// call) — the self-only gate is the access control, and it carries no reentrancy guard
-    /// because the calling deposit() already holds it. The threshold (`AUTO_COMPOUND_MIN_USDC`)
-    /// was checked by deposit() before the call. The rebalance is foolproof without caller input:
-    /// the swap is small, runs in the vault's own pool (it largely pays the fee to itself as LP),
-    /// and is hard-bounded by sqrtPriceLimitX96 — sandwiching it is unprofitable.
-    function autoCompound() external returns (uint128 liquidityAdded) {
-        require(msg.sender == address(this), "self-only");
-        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: the calling deposit
-        // holds the guard, the V4 flash-accounting is fully settled by now, and the writes are
-        // informational only.
+    /// @dev Permissionless but UNINCENTIVIZED: the primary path is deposit()'s automatic trigger
+    /// at `AUTO_COMPOUND_MIN_USDC`; anyone may also call this directly (e.g. in a quiet market
+    /// with no deposit flow) — the caller simply pays the gas and every unit reinvests for
+    /// holders. No threshold applies here: a below-threshold call only spends the caller's own
+    /// gas (the rebalance is fee-scaled, so dust harvests never trade retained balances). The
+    /// rebalance is foolproof without caller input: the swap is small, runs in the vault's own
+    /// pool (it largely pays the fee to itself as LP), and is hard-bounded by sqrtPriceLimitX96 —
+    /// sandwiching it is unprofitable.
+    function compound() external nonReentrant returns (uint128 liquidityAdded) {
+        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: nonReentrant, the V4
+        // flash-accounting is fully settled by now, and the writes are informational only.
         // slither-disable-next-line reentrancy-benign
         bytes memory res = poolManager.unlock(abi.encode(Action.COMPOUND, bytes("")));
         liquidityAdded = abi.decode(res, (uint128));

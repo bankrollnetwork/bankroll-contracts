@@ -232,9 +232,10 @@ async function redeem(ctx, user, shares, receiver) {
   return ctx.vault.connect(user).redeem(BigInt(shares), receiver ?? user.address);
 }
 
-// There is NO public compound entrypoint: once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC
-// ($100), ANY deposit runs the vault's best-effort auto-compound before its own liquidity add.
-// A small deposit by `user` is the canonical trigger; 100% of the harvest reinvests (no fee).
+// Once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC ($100), ANY deposit runs the vault's
+// best-effort compound() before its own liquidity add — the primary compound path. A small
+// deposit by `user` is the canonical trigger; 100% of the harvest reinvests (no fee). The
+// public compound() can also be called directly (unincentivized safety valve).
 async function triggerCompound(ctx, user, usdcAmount) {
   const amt = usdcAmount ?? 10n * 10n ** BigInt(ctx.cfg.usdcDecimals);
   return deposit(ctx, user, amt);

@@ -5,18 +5,18 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 interface IReentryTarget {
     function redeem(uint256 shares, address receiver) external returns (uint256, uint256);
-    function autoCompound() external returns (uint128);
+    function compound() external returns (uint128);
 }
 
 /// @dev A hostile ERC-20 that attempts to re-enter the vault from inside a token
-/// transfer (the ERC-777-style hook surface). Used to prove both re-entry defenses:
-/// while the vault is mid-deposit, any vault token movement fires (per `mode`) either
-/// a reentrant `redeem()` — which must revert with ReentrancyGuardReentrantCall() —
-/// or a direct `autoCompound()` — which must revert on the self-only gate. We capture
-/// the revert data so the test can assert the exact error.
+/// transfer (the ERC-777-style hook surface). Used to prove the guard blocks re-entry:
+/// while the vault is mid-deposit (the guarded _deposit body), any vault token movement
+/// fires (per `mode`) a reentrant `redeem()` or `compound()` — both must revert with
+/// ReentrancyGuardReentrantCall(). We capture the revert data so the test can assert
+/// the exact error.
 contract ReentrantToken is ERC20 {
     uint8 public constant MODE_REDEEM = 0;
-    uint8 public constant MODE_AUTO_COMPOUND = 1;
+    uint8 public constant MODE_COMPOUND = 1;
 
     uint8 private immutable _decimals;
     address public target;
@@ -55,8 +55,8 @@ contract ReentrantToken is ERC20 {
         if (armed && target != address(0)) {
             armed = false; // single-shot: fire on the first transfer after arming
             reentryAttempted = true;
-            if (mode == MODE_AUTO_COMPOUND) {
-                try IReentryTarget(target).autoCompound() {
+            if (mode == MODE_COMPOUND) {
+                try IReentryTarget(target).compound() {
                     reentryReverted = false;
                 } catch (bytes memory err) {
                     reentryReverted = true;
