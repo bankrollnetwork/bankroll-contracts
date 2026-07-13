@@ -3,7 +3,7 @@
 // Parameterized on addresses (unlike the submission copy) so the harness can target a fork deploy.
 
 const COMPOUND_EVT =
-  "event Compound(address indexed finder, uint256 vltFees, uint256 usdcFees, uint256 vltFinder, uint256 usdcFinder, uint128 liquidityAdded)";
+  "event Compound(uint256 vltFees, uint256 usdcFees, uint128 liquidityAdded)";
 const FEES_RETAINED_EVT = "event FeesRetained(uint256 vltFees, uint256 usdcFees)";
 
 // Returns an async (options) => dimensions function, same shape as the upstream adapter's fetch.
@@ -17,14 +17,8 @@ function makeFetch({ vault, vlt, usdc }) {
     const compounds = await options.getLogs({ target: vault, eventAbi: COMPOUND_EVT });
     const retained = await options.getLogs({ target: vault, eventAbi: FEES_RETAINED_EVT });
 
-    compounds.forEach((log) => {
-      dailyFees.add(vlt, log.vltFees);
-      dailyFees.add(usdc, log.usdcFees);
-      dailySupplySideRevenue.add(vlt, log.vltFees - log.vltFinder);
-      dailySupplySideRevenue.add(usdc, log.usdcFees - log.usdcFinder);
-    });
-
-    retained.forEach((log) => {
+    // Both event kinds reinvest 100% for shareholders — fees and supply-side are identical.
+    [...compounds, ...retained].forEach((log) => {
       dailyFees.add(vlt, log.vltFees);
       dailyFees.add(usdc, log.usdcFees);
       dailySupplySideRevenue.add(vlt, log.vltFees);

@@ -8,7 +8,7 @@
 //
 // The TVL section mirrors tvl/index.js and the fees section runs fees/index.local.js (the JS
 // mirror of fees/index.ts) — keep all three in sync. Asserts the on-chain invariants the
-// adapters rely on: finder == fee/100 per Compound, and previewRedeem ≈ position value.
+// adapters rely on: supply-side == fees (100% reinvests, no cut), and previewRedeem ≈ position value.
 
 const { ethers } = require("ethers");
 const { VLT, USDC, VAULT_PLACEHOLDER, resolveVault } = require("../addresses");
@@ -78,13 +78,12 @@ async function main() {
 
   const { compounds, retained } = dims._raw;
   console.log(`\nFees over blocks ${fromBlock}..${latest}: ${compounds.length} Compound, ${retained.length} FeesRetained`);
-  // Invariant the adapter's supply-side math relies on: finder cut == fee / 100 (1%).
-  for (const c of compounds) {
-    if (c.vltFinder !== c.vltFees / 100n || c.usdcFinder !== c.usdcFees / 100n) {
-      throw new Error(`finder != fee/100 in tx ${c._txHash} — adapter assumption broken`);
-    }
+  // Invariant the adapter's math relies on: supply-side == fees exactly (no cut of any kind).
+  const same = (a, b) => (a.items[vlt] ?? 0n) === (b.items[vlt] ?? 0n) && (a.items[usdc] ?? 0n) === (b.items[usdc] ?? 0n);
+  if (!same(dims.dailyFees, dims.dailySupplySideRevenue)) {
+    throw new Error("supply-side != fees — adapter assumption broken (some cut appeared?)");
   }
-  if (compounds.length) console.log("  ✓ finder == fee/100 holds on every Compound");
+  if (compounds.length) console.log("  ✓ supply-side == fees holds (100% reinvests, no finder cut)");
 
   const show = (label, bals) => {
     const v = bals.items[vlt] ?? 0n;

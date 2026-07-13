@@ -5,8 +5,8 @@
 //
 // Accounting (complete from vault events alone — see the repo's AUDIT.MD §7a):
 //   realized pool fees      = Σ Compound.vltFees/usdcFees  +  Σ FeesRetained.vltFees/usdcFees
-//   keeper (finder) payout  = Σ Compound.vltFinder/usdcFinder   (1% of each fresh harvest)
-//   supply-side revenue     = fees − finder payout          (auto-compounded to shareholders)
+//   supply-side revenue     = the same total — 100% reinvests for shareholders (no fee of
+//                             any kind; there is no keeper and no finder cut)
 //   protocol revenue        = 0                              (ownerless vault, no fee switch)
 //
 // NOTE: keep the plain-JS mirror of this fetch loop (fees/index.local.js in the project repo)
@@ -20,7 +20,7 @@ const VLT = "0x6b785a0322126826d8226d77e173d75dafb84d11"; // currency0, 18 decim
 const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"; // currency1, 6 decimals
 
 const COMPOUND_EVT =
-  "event Compound(address indexed finder, uint256 vltFees, uint256 usdcFees, uint256 vltFinder, uint256 usdcFinder, uint128 liquidityAdded)";
+  "event Compound(uint256 vltFees, uint256 usdcFees, uint128 liquidityAdded)";
 const FEES_RETAINED_EVT = "event FeesRetained(uint256 vltFees, uint256 usdcFees)";
 
 const fetch = async (options: FetchOptions) => {
@@ -32,16 +32,8 @@ const fetch = async (options: FetchOptions) => {
   const compounds = await options.getLogs({ target: VAULT, eventAbi: COMPOUND_EVT });
   const retained = await options.getLogs({ target: VAULT, eventAbi: FEES_RETAINED_EVT });
 
-  compounds.forEach((log: any) => {
-    dailyFees.add(VLT, log.vltFees);
-    dailyFees.add(USDC, log.usdcFees);
-    // The 1% finder cut goes to the permissionless keeper, not to shareholders.
-    dailySupplySideRevenue.add(VLT, log.vltFees - log.vltFinder);
-    dailySupplySideRevenue.add(USDC, log.usdcFees - log.usdcFinder);
-  });
-
-  retained.forEach((log: any) => {
-    // Fees harvested-and-retained by deposits/redeems reinvest 100% (no finder cut).
+  // Both event kinds reinvest 100% for shareholders — fees and supply-side are identical.
+  [...compounds, ...retained].forEach((log: any) => {
     dailyFees.add(VLT, log.vltFees);
     dailyFees.add(USDC, log.usdcFees);
     dailySupplySideRevenue.add(VLT, log.vltFees);
@@ -54,9 +46,9 @@ const fetch = async (options: FetchOptions) => {
 const methodology = {
   Fees: "Uniswap V4 VLT/USDC 1% pool trading fees realized by the vault's full-range position: Compound events report each harvest-and-reinvest in full (vltFees/usdcFees), and FeesRetained events report fees swept to the vault when deposits/redeems touch the position.",
   SupplySideRevenue:
-    "Realized fees minus the 1% finder cut paid to whoever calls the permissionless compound(); the remainder is auto-compounded into the position for all shareholders.",
+    "Equal to Fees: 100% of realized fees auto-compound into the position for shareholders. There is no keeper and no fee of any kind — compounding runs inside deposits.",
   Revenue:
-    "Zero. The vault is ownerless with no protocol fee switch. The only non-shareholder cut is the 1% keeper incentive (Compound.vltFinder/usdcFinder), which is excluded from SupplySideRevenue and documented here.",
+    "Zero. The vault is ownerless with no protocol fee switch and takes no cut from any flow.",
   ProtocolRevenue: "Zero. No protocol take exists or can be added (immutable, ownerless vault).",
 };
 

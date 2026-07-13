@@ -41,7 +41,7 @@ src/contracts/
 │   └── dev/                      # local-only bootstrap helpers
 ├── periphery/
 │   ├── defillama/                # submission-ready TVL + fees adapters (+ fork test harness)
-│   └── dune/                     # DuneSQL dashboard queries (fees, TVL, APR, finders, holders)
+│   └── dune/                     # DuneSQL dashboard queries (fees, TVL, APR, holders)
 ├── test/
 │   ├── helpers/                  # fixture (real PoolManager + mocks) + math
 │   ├── vault.flows.test.js       # deposit / redeem / auto-compound happy paths
@@ -94,7 +94,7 @@ What's covered (maps to the completion plan):
 | `_liquidityForAmounts` wired (Blocker 1) | every deposit/compound test |
 | Zero residual delta on every callback (Blocker 2) | implicit — the PoolManager reverts `CurrencyNotSettled` otherwise, so all passing flow tests prove it |
 | Off-chain quoter (Blocker 3): negligible dust + `minOut` holds under a sandwich | `scripts.quoter.test.js` |
-| Flows: deposit ΔL/dust, redeem in-kind, auto-compound 1% finder rebate / no shares / L up | `vault.flows.test.js`, `vault.edge.test.js` |
+| Flows: deposit ΔL/dust, redeem in-kind, auto-compound 100% reinvest / no shares / L up | `vault.flows.test.js`, `vault.edge.test.js` |
 | BUG-1: deposit/redeem retain fees at the vault (don't sweep them to the caller) | `vault.fees.test.js` |
 | ZapHelper: external sourcing, buy pressure, sandwich bound, Permit2 branch | `scripts.quoter.test.js`, `zaphelper.permit2.test.js` |
 | Invariants: solvency, no-free-shares, compound monotonicity, settlement | `vault.invariants.test.js` |
@@ -176,7 +176,7 @@ for the dev account. `fork:fees` runs volume-only rounds without compounding.
 Expected shape of a healthy run (validated July 10, 2026): simulate reports
 `60/60 days compounded` with L/share monotonically rising (≈1.10 after 60 days at the
 default volume), and `adapters:test` shows a consistent TVL (both token legs on the right
-decimal scales), 60 decoded `Compound` events, and `✓ finder == fee/100 holds` on every one.
+decimal scales), 60 decoded `Compound` events, and `✓ supply-side == fees` on every one.
 
 Two fork-specific gotchas, both time-related:
 
@@ -247,9 +247,8 @@ All four "fix during implementation" items from the completion plan are done:
 - **`_liquidityForAmounts` wired** to v4-periphery `LiquidityAmounts.getLiquidityForAmounts`
   with `TickMath.getSqrtPriceAtTick(tickLower/tickUpper)` — no hand-rolled rounding.
 - **`RedeemData.shares` → `RedeemData.liquidity`** (it always carried L, not a share count).
-- **The compound leg pays the finder LAST** (checks-effects-interactions): 100% of fees are
-  taken to the vault, the 99% is reinvested, then the finder's 1% is transferred — so no
-  external call to the depositor happens before all pool-state effects settle.
+- **The compound leg makes no external transfer to any account**: 100% of fees are taken
+  to the vault and reinvested; the only token movements are settlements with the PoolManager.
 - **Documented design choices in-code:** compound dust **folds forward** into the next
   compound (it isn't counted in shares, so it can only ever raise future NAV); the `uint128`
   downcast in `redeem` is provably bounded by the position's own `uint128` liquidity; USDC's
@@ -257,20 +256,20 @@ All four "fix during implementation" items from the completion plan are done:
   their problem, not a solvency issue) and the deliberate absence of any approval flow.
 
 Plus **fee-accounting events for off-chain adapters** (post-audit, July 2026): `Compound`
-now emits the FULL freshly-harvested `fee0`/`fee1` alongside the finder cut, and a new
+emits the FULL freshly-harvested `fee0`/`fee1`, and a
 `FeesRetained(fee0, fee1)` fires whenever `deposit`/`redeem` harvest-and-retain pool fees.
 Log-based fee accounting (e.g. a DefiLlama fees adapter) is now complete from events alone:
-realized fees = Σ `Compound.fee` + Σ `FeesRetained.fee`; depositor rebates = Σ `finder`; TVL
+realized fees = Σ `Compound.fee` + Σ `FeesRetained.fee`, all of it supply-side; TVL
 needs no events (`previewRedeem(totalSupply())` + vault balances). See `AUDIT.MD` §7a.
 
 Plus **BUG-1 (found by Slither, confirmed by test, fixed):** V4 folds the position's *full*
 `feesAccrued` into `callerDelta` on **any** `modifyLiquidity`. The scaffold's `_onRedeem`
 handed the whole delta to the redeemer and `_addLiquidity` netted it into a depositor's cost —
 so the first party to touch the position after fees accrued swept **100%** of the uncompounded
-fees, defeating the compound/finder model. Fixed by splitting `callerDelta − feesAccrued`:
+fees, defeating the compound model. Fixed by splitting `callerDelta − feesAccrued`:
 the caller gets only their principal, and the fees are retained at `address(this)` (a deposit
-harvests them up front), folding forward to all holders. Only the auto-compound leg of a
-triggering deposit ever pays fees out (the finder's 1%).
+harvests them up front), folding forward to all holders. No path ever pays fees out — the
+auto-compound leg converts them to position liquidity.
 
 ## Core / periphery split (ZapHelper)
 
@@ -308,7 +307,7 @@ moves stripped out. It rests on one fact: **shares ≡ liquidity (L)**, and the 
 (run by a triggering deposit) adds L *without minting shares for it*, so **L/share rises only on
 a compound leg** — never on a deposit's own pro-rata add, on redeems, or on price. It starts at
 exactly `1.0` on the first deposit, so `L/share − 1` is the
-price-neutral, IL-free, finder-fee-net lifetime fee growth. (USD NAV/share would conflate fees with
+price-neutral, IL-free lifetime fee growth. (USD NAV/share would conflate fees with
 the VLT price — the wrong signal for "are the fees working.")
 
 **The ring buffer.** A trailing window needs *historical* L/share, and the vault deliberately avoids
@@ -372,14 +371,10 @@ justifications, so Solhint/Slither stay clean.
   compound leg best-effort (try/catch, `AutoCompoundFailed` on a swallowed revert) before its own
   liquidity is measured. Quiet markets defer reinvestment — value-neutral, since deposit/redeem
   already retain accrued fees for all holders.
-- **Finder fee:** 1% hardcoded, paid to the depositor whose deposit triggers the compound — a
-  gas rebate, not a keeper incentive; the $100 trigger keeps the compound worth its gas.
-- **Finder fee base (nuance, by design):** the 1% rebate is charged only on the fees a given
-  compound leg freshly harvests from the pool (`feesAccrued`), **not** on the vault's full
-  balance. Fees retained at the vault by `deposit`/`redeem` (the BUG-1 fix) and prior compound
-  dust are reinvested **100%, with no finder cut** — pure upside to holders. Consequence: the
-  rebate scales with newly-accrued *pool* fees, not the retained balance. Harmless,
-  but a conscious choice (documented in `_onCompound`, flagged for the audit).
+- **No compound fee:** 100% of every harvest (fresh pool fees + retained balances + prior
+  dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
+  depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile
+  relative to the amount reinvested.
 
 ## Remaining before mainnet
 
@@ -392,8 +387,7 @@ Mapping to the completion plan's Definition of Done — what this workspace does
    across every callback; the **deposit-triggered auto-compound** (self-only `autoCompound`
    entrypoint with no reentrancy guard, try/catch isolation, the $100 trigger constant, and the
    donation-socialization semantics that replaced donation inertness — see the rewritten
-   first-deposit-inflation test); the finder-fee-base nuance (1% on freshly-harvested pool fees
-   only; retained fees reinvest with no finder cut); and the **ZapHelper / external-sourcing
+   first-deposit-inflation test); and the **ZapHelper / external-sourcing
    path** (deposit's dependency on VLT's external market, the
    arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
    NOTE: `AUDIT.MD`'s line citations were pinned against `6d76648` and predate this change.

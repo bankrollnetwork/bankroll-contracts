@@ -18,7 +18,7 @@ vault is deployed.
   shares) **+** the vault's ERC-20 balances of both tokens (fees retained awaiting compound).
   Pure view calls — no events, no indexing.
 - **Fees** (from events alone): realized pool fees = Σ `Compound.vltFees/usdcFees` + Σ `FeesRetained.vltFees/usdcFees`.
-- **SupplySideRevenue** = fees − Σ `Compound.vltFinder/usdcFinder` (the 1% permissionless-keeper cut).
+- **SupplySideRevenue** = fees, in full — 100% of every harvest reinvests for shareholders (no keeper, no finder cut; compounding runs inside deposits).
 - **Revenue / ProtocolRevenue** = 0 — the vault is ownerless with no fee switch.
 - Token ordering everywhere: `*0` = VLT (18 decimals), `*1` = USDC (6 decimals)
   (VLT `0x6b78…` < USDC `0xa0b8…` ⇒ VLT is currency0).
@@ -36,8 +36,8 @@ npm run adapters:test  # = node periphery/defillama/test/run-fork.js
 ```
 
 The harness prints TVL token balances (+USD via coins.llama.fi), runs the fees fetch over the
-recent block range (`FROM_BLOCK` env to widen), and **asserts `finder == fee/100`** on every
-`Compound` — the invariant the supply-side math relies on. `RPC_URL` / `VAULT_ADDRESS`
+recent block range (`FROM_BLOCK` env to widen), and **asserts supply-side == fees** — the
+invariant the adapter math relies on (no cut of any kind). `RPC_URL` / `VAULT_ADDRESS`
 override the defaults (localhost:8545 / `.deployed.json`), so the same command validates the
 real mainnet deployment later.
 
@@ -69,7 +69,4 @@ real mainnet deployment later.
       (`api.sumTokens` vs `sumTokens2` from `helper/unwrapLPs`) and match it.
 - [ ] `pullHourly` flag on the fees adapter: copy whatever a recently merged fees PR does for
       a low-activity protocol.
-- [ ] Keeper-cut classification: we report the 1% finder cut inside `dailyFees` but outside
-      `dailySupplySideRevenue`, with `dailyRevenue = 0`. Some Llama reviewers prefer keeper
-      incentives inside `dailyRevenue` — if asked, move the finder sums there (one-line change).
 - [ ] If `fees/index.ts` logic changed since this was written, sync `fees/index.local.js`.
