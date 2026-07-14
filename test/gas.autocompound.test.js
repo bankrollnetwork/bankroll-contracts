@@ -1,7 +1,5 @@
-// Gas experiment for the proposed deposit-triggered auto-compound.
-//
-// Runs unchanged on BOTH the unmodified vault (baseline) and the prototype
-// (threshold-gated `try this.autoCompound(msg.sender)` at the top of deposit()).
+// Gas measurements for the deposit-triggered auto-compound (threshold-gated internal
+// _compound() call at the top of deposit(); public compound() wraps the same leg).
 // It prints "GAS <label> <gasUsed>" lines for comparison and logs whether a
 // Compound event fired inside each measured call, plus the caller's leftover
 // balances (which must now be pure deposit refunds — no fee is paid to anyone).

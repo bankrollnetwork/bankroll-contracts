@@ -233,9 +233,9 @@ async function redeem(ctx, user, shares, receiver) {
 }
 
 // Once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC ($100), ANY deposit runs the vault's
-// best-effort compound() before its own liquidity add — the primary compound path. A small
+// internal _compound() leg before its own liquidity add — the primary compound path. A small
 // deposit by `user` is the canonical trigger; 100% of the harvest reinvests (no fee). The
-// public compound() can also be called directly (unincentivized safety valve).
+// public compound() wraps the same leg (unincentivized safety valve).
 async function triggerCompound(ctx, user, usdcAmount) {
   const amt = usdcAmount ?? 10n * 10n ** BigInt(ctx.cfg.usdcDecimals);
   return deposit(ctx, user, amt);

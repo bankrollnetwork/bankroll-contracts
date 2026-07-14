@@ -98,7 +98,7 @@ What's covered (maps to the completion plan):
 | BUG-1: deposit/redeem retain fees at the vault (don't sweep them to the caller) | `vault.fees.test.js` |
 | ZapHelper: external sourcing, buy pressure, sandwich bound, Permit2 branch | `scripts.quoter.test.js`, `zaphelper.permit2.test.js` |
 | Invariants: solvency, no-free-shares, compound monotonicity, settlement | `vault.invariants.test.js` |
-| Edge/abuse: `deposit(0)`, redeem>balance, below-threshold deposit (no compound), donation socialization, reentrancy + self-only gate, blacklisted USDC | `vault.edge.test.js` |
+| Edge/abuse: `deposit(0)`, redeem>balance, below-threshold deposit (no compound), donation socialization, reentrancy on every entrypoint, blacklisted USDC | `vault.edge.test.js` |
 | Security: `nonReentrant`/CEI, `MINIMUM_LIQUIDITY`, `sweep` can't touch core tokens, pause never blocks redeem | `vault.edge.test.js` |
 
 ### Static analysis
@@ -367,11 +367,12 @@ justifications, so Solhint/Slither stay clean.
   from the Uniswap Routing API; for production-grade `minShares` a frontend can `callStatic` the
   zap. The included split math (swap ≈ `D/(2−fee)`) leaves <2% dust in tests.
 - **No keeper:** compounding is deposit-triggered. Once claimable value reaches
-  `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) the next deposit runs `compound()`
-  best-effort (try/catch, `AutoCompoundFailed` on a swallowed revert) before its own liquidity
-  is measured. `compound()` itself is public but unincentivized — anyone may reinvest for
-  holders in a quiet market at their own gas cost. Staleness is value-neutral either way, since
-  deposit/redeem already retain accrued fees for all holders.
+  `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) the next deposit runs the internal
+  `_compound()` leg before its own liquidity is measured; the public `compound()` wraps the
+  same leg — unincentivized, so anyone may reinvest for holders in a quiet market at their own
+  gas cost. Deposit and compound share fate (a reverting leg reverts the triggering deposit —
+  it is argument-free with hard internal bounds, and `compound()` reproduces any revert loudly).
+  Staleness is value-neutral, since deposit/redeem already retain accrued fees for all holders.
 - **No compound fee:** 100% of every harvest (fresh pool fees + retained balances + prior
   dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
   depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile
@@ -385,9 +386,10 @@ Mapping to the completion plan's Definition of Done — what this workspace does
    after any contract change.
 2. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
    the V4 fee-settlement path (BUG-1) and that the `feesAccrued`/principal split is complete
-   across every callback; the **deposit-triggered auto-compound** (self-only `autoCompound`
-   entrypoint with no reentrancy guard, try/catch isolation, the $100 trigger constant, and the
-   donation-socialization semantics that replaced donation inertness — see the rewritten
+   across every callback; the **deposit-triggered auto-compound** (the public `compound()`
+   wrapper over the internal `_compound()` leg shared with deposit, the shared-fate coupling —
+   a reverting compound leg blocks threshold-crossing deposits — the $100 trigger constant, and
+   the donation-socialization semantics that replaced donation inertness — see the rewritten
    first-deposit-inflation test); and the **ZapHelper / external-sourcing
    path** (deposit's dependency on VLT's external market, the
    arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
