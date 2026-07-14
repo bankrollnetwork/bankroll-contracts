@@ -366,13 +366,13 @@ justifications, so Solhint/Slither stay clean.
   ZapHelper's `swapUsdcToVlt` split + `minVltOut`. The actual route calldata (`swapData`) comes
   from the Uniswap Routing API; for production-grade `minShares` a frontend can `callStatic` the
   zap. The included split math (swap ≈ `D/(2−fee)`) leaves <2% dust in tests.
-- **No keeper:** compounding is deposit-triggered. Once claimable value reaches
-  `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) the next deposit runs the internal
-  `_compound()` leg before its own liquidity is measured; the public `compound()` wraps the
-  same leg — unincentivized, so anyone may reinvest for holders in a quiet market at their own
-  gas cost. Deposit and compound share fate (a reverting leg reverts the triggering deposit —
-  it is argument-free with hard internal bounds, and `compound()` reproduces any revert loudly).
-  Staleness is value-neutral, since deposit/redeem already retain accrued fees for all holders.
+- **No keeper, no compound entrypoint:** the external write surface is `deposit` + `redeem`,
+  full stop. Once claimable value reaches `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant)
+  and the position exists (the pre-seed gate — AUDIT.MD §7d M-01), the next deposit runs the
+  internal `_compound()` leg before its own liquidity is measured; a small deposit is the
+  manual compound in a quiet market. Deposit and compound share fate (a reverting leg reverts
+  the triggering deposit — it is argument-free with hard internal bounds). Staleness is
+  value-neutral, since deposit/redeem already retain accrued fees for all holders.
 - **No compound fee:** 100% of every harvest (fresh pool fees + retained balances + prior
   dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
   depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile
@@ -386,11 +386,11 @@ Mapping to the completion plan's Definition of Done — what this workspace does
    after any contract change.
 2. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
    the V4 fee-settlement path (BUG-1) and that the `feesAccrued`/principal split is complete
-   across every callback; the **deposit-triggered auto-compound** (the public `compound()`
-   wrapper over the internal `_compound()` leg shared with deposit, the shared-fate coupling —
-   a reverting compound leg blocks threshold-crossing deposits — the $100 trigger constant, and
-   the donation-socialization semantics that replaced donation inertness — see the rewritten
-   first-deposit-inflation test); and the **ZapHelper / external-sourcing
+   across every callback; the **deposit-triggered auto-compound** (see AUDIT.MD §7d: the
+   internal `_compound()` leg with no external entrypoint, the shared-fate coupling — a
+   reverting compound leg blocks threshold-crossing deposits — the M-01 pre-seed gate, the
+   $100 trigger constant, and the donation-socialization semantics that replaced donation
+   inertness); and the **ZapHelper / external-sourcing
    path** (deposit's dependency on VLT's external market, the
    arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
    NOTE: `AUDIT.MD`'s line citations were pinned against `6d76648` and predate this change.

@@ -1,7 +1,7 @@
 // DEV ONLY. Simulate N days of fee accrual + daily compounding against the running fork, so the
 // vault's L/share ring buffer fills and feeApr() reports real 7d / 30d numbers. A deposit
-// whose claimable value is ≥ AUTO_COMPOUND_MIN_USDC ($100) runs the compound leg itself (the
-// production path; a public unincentivized compound() also exists). Each "day" the script:
+// whose claimable value is ≥ AUTO_COMPOUND_MIN_USDC ($100) runs the compound leg itself —
+// the ONLY compound path (no compound entrypoint exists). Each "day" the script:
 //   1. round-trips USDC↔VLT through the pool until ≥ $110 is claimable (balanced — no drift),
 //   2. makes a small zapDeposit — the trigger deposit compounds + writes one daily snapshot,
 //   3. advances the EVM clock by 1 day.

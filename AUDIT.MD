@@ -7,7 +7,7 @@
 | **Compiler** | solc 0.8.26, optimizer 200 runs, `viaIR`, `evmVersion: cancun` |
 | **Performed by** | Claude (Fable 5) with Solidity Audit Skill |
 | **Date** | July 8, 2026 |
-| **Status of code** | Pre-deployment (not yet on mainnet); Hardhat workspace, 47 tests passing |
+| **Status of code** | Pre-deployment (not yet on mainnet); Hardhat workspace, 47 tests passing (61 after the §7d keeperless redesign) |
 
 This audit covers source-code analysis, static analysis (Slither, re-run fresh for this
 report), and review of the project's dynamic test suite (executed for this report). It is not
@@ -72,6 +72,10 @@ in-code-documented design choices flagged here for completeness.
 | Medium | 0 | — |
 | Low | 3 | **All 3 fixed** (July 8, 2026 — see per-finding Resolution notes) |
 | Informational | 10 | Acknowledged / by design (I-10 added by the July 9 re-audit) |
+
+**July 14, 2026 (§7d):** the keeperless auto-compound redesign introduced **and fixed, pre-deployment,**
+one Medium (M-01 — pre-seed donation DoS via the new deposit trigger) and obsoleted I-01/I-07.
+Line citations in §§1–7 predate the redesign; §7d is the authoritative record of the delta.
 
 **Remediation re-verification (July 8, 2026):** after the L-01–L-03 fixes, the contracts
 recompile clean, **Slither again reports 0 results** (75 contracts, 96 detectors), Solhint is
@@ -192,6 +196,10 @@ band bounds the vault's own price impact; the cap bounds the notional exposed to
 manipulation). Regression test: `vault.flows.test.js` — "rebalance swap is capped by fresh
 fees: a one-sided donation alone is never swapped."
 
+**Note (July 14, 2026 — §7d):** `compound()` no longer exists as an entrypoint; the same logic
+is the internal `_compound()` leg triggered by deposits. The rebalance cap and price-bound
+analysis above applies unchanged.
+
 ### L-02 — `zap()` sends the unspent-input refund to `recipient`, not to the caller
 
 **Location:** `ZapHelper.sol:138-150` (`zap`); pre-fix the refund `_sweep` sent unspent `tokenIn` to `recipient` (now `msg.sender`, line 141)
@@ -253,6 +261,10 @@ position). Nothing is stuck or lost — `compound()` simply reverts until the fi
 creates the position, after which the donation folds into the next compound as designed.
 Self-healing; noted for completeness.
 
+**Superseded (July 14, 2026 — §7d):** under the keeperless redesign this behavior briefly
+escalated to a vault-bricking DoS (M-01) and was fixed by gating the deposit trigger on
+`positionLiquidity() > 0`; a pre-seed donation now sits retained until the position exists.
+
 ### I-02 — Permit2 branch of `_execRoute` does not reset the residual ERC-20 approval
 
 `_execRoute` resets the router allowance to 0 after the route in the plain-allowance branch
@@ -302,6 +314,10 @@ can be satisfied almost entirely by retained balances while the bounty is near z
 rational keeper calls `compound()` and the retained value sits unreinvested until fresh
 pool fees accrue. Pure opportunity cost to holders, no loss; flagged so the choice is
 re-confirmed at the Shieldify review as the README requests.
+
+**Obsolete (July 14, 2026 — §7d):** the finder fee was removed entirely — 100% of every
+harvest reinvests for holders and no keeper path exists, so this incentive-lag concern no
+longer has a subject.
 
 ### I-08 — `ZapHelper` emits no events
 
@@ -533,6 +549,74 @@ deltas under BOTH orderings.
 Consumers updated in the same pass: Dune queries/README, DefiLlama fees + TVL adapters and
 fork harness, frontend ABI + test client. Suite at 54 passing (plus the 2 mainnet-fork
 tests), Solhint clean, Slither 0 findings (96 detectors, re-run July 10 post-§7b/§7c).
+
+---
+
+## 7d. Post-audit change (July 14, 2026): keeperless auto-compound redesign
+
+The keeper model was removed end-to-end (branch `experiment/auto-compound-gas`). This section
+is the authoritative record of the delta; line citations in earlier sections predate it.
+
+**Design delta.**
+- **No compound entrypoint of any kind.** The vault's external write surface is now
+  `deposit` and `redeem`, full stop. The former `compound()` logic is the internal
+  `_compound()` leg, reached only from `deposit()`: once `compoundClaimable().valueUsdc`
+  reaches **`AUTO_COMPOUND_MIN_USDC` (100e6, a public ungoverned constant)** *and the
+  position exists*, the deposit harvests + reinvests before its own liquidity is measured.
+  `MIN_COMPOUND_VALUE_USDC` ($1 keeper gate) is removed. A small deposit is the manual way
+  to force a compound in a quiet market.
+- **No fee of any kind.** `FINDER_FEE_BPS` and the finder payout are gone; 100% of every
+  harvest reinvests for holders. The compound leg makes **no external transfer to any
+  account** — its only token movements are settlements with the `PoolManager` (this deletes
+  the CEI concern around paying an arbitrary caller).
+- **Event change (off-chain breaking):** `Compound(uint256 vltFees, uint256 usdcFees,
+  uint128 liquidityAdded)` — topic0 `0x9bc6dc46ca3a56321f65a8e41f17e5a16077d04974dd396b6af9d0bb91c62094`.
+  The §7a accounting identity simplifies: supply-side revenue == realized fees (no keeper
+  term). DefiLlama adapters, the fork harness, and the Dune queries were updated in the same
+  pass (the keeper-economics query was deleted).
+- **Reentrancy structure:** guards live only on the external entrypoints (`deposit`,
+  `redeem`); `_compound()` executes under the calling deposit's lock. Hostile-token probes
+  re-aimed accordingly: reentrant `redeem()` and reentrant `deposit()` from a token hook
+  mid-deposit both revert with `ReentrancyGuardReentrantCall` (asserted byte-exact).
+
+**M-01 (Medium, introduced and FIXED during this redesign — never deployed): pre-seed
+donation permanently bricks the vault.** Composing three individually-reasoned choices —
+(1) the auto-compound trigger inside `deposit()`, (2) shared fate (direct internal call, no
+try/catch), and (3) V4's revert on a zero-delta poke of a nonexistent position (I-01) —
+produced a griefing vector: a ≥$100 donation to a **virgin** vault would make every
+first-deposit attempt run a reverting compound, and since nothing can lower claimable value,
+the vault would be permanently unusable for a $100 outlay (no fund loss; redeploy possible).
+**Fix:** the trigger is gated on `positionLiquidity() > 0` (a load-bearing gate, documented
+in-code); pre-seed donations sit retained and fold into the first post-seed compound.
+**Regression test:** `vault.edge.test.js` — "a >= $100 donation to a virgin vault does not
+make the first deposit revert."
+
+**Accepted risk — shared fate (flagged for Shieldify).** With no try/catch isolation, a
+reverting `_compound()` reverts every threshold-crossing deposit, and claimable value can
+only fall via a successful compound — a latent revert in the leg would therefore block
+deposits above the trigger permanently (redemption is unaffected; an orderly exit and
+redeploy remains possible). Accepted deliberately for simplicity: the leg is argument-free,
+its swap is double-bounded (L-01 cap + ≤5% price limit), and it is exercised by every
+threshold-crossing deposit in the suite and the 60-day fork simulation. **Audit focus
+request: revert-freedom of `_onCompound`/`_rebalance`/`_addLiquidity` across pool states.**
+
+**Property change — donation socialization (supersedes the §7 donation-inertness claim).**
+Deposits now reinvest pending value before pricing shares, so a donation is socialized to
+pre-existing holders at the next triggering deposit instead of sitting inert. The
+first-deposit inflation analysis was re-derived: the depositor still receives exact
+ΔL-formula shares at the post-compound price (value-fair, `minShares`-guarded), donations
+mint nobody shares, and `MINIMUM_LIQUIDITY` keeps inflation griefing a ~1000:1 money-loser.
+The former exact-issuance test was replaced by a socialization-semantics test. This also
+narrows I-10's JIT-capture window: above the $100 trigger, pending value is crystallized
+into L *before* the joiner's shares are priced.
+
+**Verification.** 61 tests passing (fee-less compound asserted exactly: trigger depositor's
+wallet delta == deposit refund; Compound event == full gross harvest; NAV/share monotonic
+under pre-trigger price pushes; below-threshold deposits provably skip the leg). Gas:
+quiet deposit ~237.9k (+16.4k claimable view check vs. main), triggering deposit ~481.5k
+(vs. main's 418k keeper tx + 222k deposit as two transactions). See `GASNOTES.md`.
+**Slither re-run July 14 on the final keeperless code: 0 results (75 contracts, 96
+detectors); Solhint clean.**
 
 ---
 

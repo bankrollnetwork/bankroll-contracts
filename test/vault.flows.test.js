@@ -372,8 +372,9 @@ describe("VltUsdcVault — core flows", () => {
       const fns = ctx.vault.interface.fragments
         .filter((f) => f.type === "function")
         .map((f) => f.name);
-      // compound() is public (unincentivized safety valve); deposits are the primary trigger.
-      expect(fns).to.include("compound");
+      // No compound entrypoint of any kind — the external write surface is deposit + redeem
+      // only; compounding is purely a side effect of deposits.
+      expect(fns).to.not.include("compound");
       expect(fns).to.not.include("autoCompound");
       // No setter of any kind — the trigger can never be moved (no DoS / governance lever).
       expect(fns.some((n) => n.startsWith("set"))).to.equal(false);

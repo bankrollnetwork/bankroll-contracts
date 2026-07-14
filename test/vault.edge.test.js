@@ -169,31 +169,40 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       expect(lastError.slice(0, 10)).to.equal(selector);
     });
 
-    it("a hostile token calling compound() mid-deposit is blocked by the guard too", async () => {
+    it("a hostile token re-entering deposit() itself is blocked by the guard too", async () => {
       const ctx = await loadFixture(reentrantFixture);
-      const lastError = await armedDeposit(ctx, 1 /* MODE_COMPOUND */);
+      const lastError = await armedDeposit(ctx, 1 /* MODE_DEPOSIT */);
       const selector = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
       expect(lastError.slice(0, 10)).to.equal(selector);
     });
+  });
 
-    it("compound() is public and permissionless: any outsider can reinvest for holders", async () => {
+  describe("pre-seed donation cannot brick the vault", () => {
+    it("a >= $100 donation to a virgin vault does not make the first deposit revert", async () => {
+      // V4 reverts a zero-delta poke on a nonexistent position, so without the trigger's
+      // positionLiquidity() gate this donation would make EVERY first-deposit attempt run a
+      // reverting compound — permanently bricking the vault for $100 (claimable can never
+      // drop). The gate defers the compound until a position exists.
       const ctx = await loadFixture(deployVaultFixture);
-      await fundUsdc(ctx, ctx.alice, USDC(50000));
-      await (await deposit(ctx, ctx.alice, USDC(50000))).wait();
-      await accrueFeesTo(ctx, USDC(120));
+      await (await ctx.usdc.mint(ctx.vault.target, USDC(150))).wait(); // pre-seed donation
 
-      const lBefore = await ctx.vault.positionLiquidity();
-      const supplyBefore = await ctx.vault.totalSupply();
-      const vltBefore = await ctx.vlt.balanceOf(ctx.finder.address);
-      const usdcBefore = await ctx.usdc.balanceOf(ctx.finder.address);
+      const rc = await (await deposit(ctx, ctx.alice, USDC(1000))).wait();
+      expect(findEvent(ctx.vault, rc, "Compound")).to.equal(null); // gated — no compound leg
+      expect(await ctx.vault.balanceOf(ctx.alice.address)).to.be.greaterThan(0n);
+      // The donation sits retained for holders (a one-sided donation alone is never swapped —
+      // the rebalance cap scales with FRESH fees, which are still zero).
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.equal(USDC(150));
 
-      // The finder signer holds no shares and gets no reward — a pure gas donation.
-      const rc = await (await ctx.vault.connect(ctx.finder).compound()).wait();
-      expect(findEvent(ctx.vault, rc, "Compound")).to.not.equal(null);
-      expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
-      expect(await ctx.vault.totalSupply()).to.equal(supplyBefore); // no shares minted
-      expect(await ctx.vlt.balanceOf(ctx.finder.address)).to.equal(vltBefore); // no payout
-      expect(await ctx.usdc.balanceOf(ctx.finder.address)).to.equal(usdcBefore);
+      // Once fresh fees exist, the next deposit's compound leg starts folding the donation in.
+      const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
+      const c1Dec = ctx.usdcIsCurrency0 ? ctx.cfg.vltDecimals : ctx.cfg.usdcDecimals;
+      for (let i = 0; i < 3; i++) {
+        await (await swapExact(ctx, ctx.seeder, true, 2000n * 10n ** BigInt(c0Dec))).wait();
+        await (await swapExact(ctx, ctx.seeder, false, 2000n * 10n ** BigInt(c1Dec))).wait();
+      }
+      const rc2 = await (await deposit(ctx, ctx.bob, USDC(1000))).wait();
+      expect(findEvent(ctx.vault, rc2, "Compound")).to.not.equal(null); // now it compounds
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(USDC(150));
     });
   });
 

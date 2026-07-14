@@ -18,18 +18,17 @@ pragma solidity 0.8.26;
       - redeem(shares): burn shares, remove pro-rata liquidity, return BOTH
         tokens in-kind (no auto-sell). Solvent by construction.
       - Auto-compound: deposit() runs the internal _compound() leg once the
-        claimable value reaches AUTO_COMPOUND_MIN_USDC. Fees are collected and
-        100% reinvests as liquidity — NO fee of any kind is taken. Mints NO
-        shares, so L grows against a fixed share supply => every holder's
-        redemption value rises automatically. compound() (the external wrapper
-        over the same leg) is public but UNINCENTIVIZED (no keeper economics,
-        no bounty): deposits trigger compounding automatically, and anyone may
-        call it directly in a quiet market. Deposit and compound share fate by
-        design — the leg is argument-free with hard internal bounds, and the
-        public compound() reproduces any revert loudly for diagnosis.
-        Staleness is value-neutral — deposit/redeem already retain accrued
-        fees for all holders, and everything folds forward into the next
-        compound.
+        claimable value reaches AUTO_COMPOUND_MIN_USDC (and the position
+        exists). Fees are collected and 100% reinvests as liquidity — NO fee
+        of any kind is taken. Mints NO shares, so L grows against a fixed
+        share supply => every holder's redemption value rises automatically.
+        There is NO compound entrypoint and no keeper: the vault's external
+        write surface is deposit and redeem, full stop — compounding is purely
+        a side effect of deposits (a small deposit forces one in a quiet
+        market). Deposit and compound share fate by design — the leg is
+        argument-free with hard internal bounds. Staleness is value-neutral —
+        deposit/redeem already retain accrued fees for all holders, and
+        everything folds forward into the next compound.
 
     STATUS: `_liquidityForAmounts` is now wired to v4-periphery's canonical
     LiquidityAmounts library (was a revert placeholder). The scaffold-level
@@ -97,7 +96,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     uint256 internal constant Q96 = 1 << 96;
     uint256 internal constant Q128 = 1 << 128;
 
-    /// @dev compound()'s internal rebalance swap is bounded to a <=5% pool-price move via
+    /// @dev The compound leg's internal rebalance swap is bounded to a <=5% pool-price move via
     /// `sqrtPriceLimitX96`. Because price = sqrtP^2, the sqrt-space factors are sqrt(0.95) and
     /// sqrt(1.05) (×BPS). The swap fills as much as fits inside this bound; any unfilled remainder
     /// folds forward into the next compound. NOTE: this bounds the price impact OF THE VAULT'S OWN
@@ -152,8 +151,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
 
     // Daily L/share history for trailing (7d/30d) fee-growth APR. `perShareWad` is L/share scaled by
     // 1e18 (a fixed-point ratio, NOT the share decimals, which are 0); we store the RATIO because it
-    // nets out deposits/redeems and moves only on compound(). One snapshot per UTC day, written at the
-    // end of compound(). A circular buffer: feeHistoryHead is the newest slot. Informational only.
+    // nets out deposits/redeems and moves only on the compound leg. One snapshot per UTC day, written
+    // at the end of _compound(). A circular buffer: feeHistoryHead is the newest slot. Informational only.
     // 35 slots = the longest reported window (30d) + ~5 days of headroom, so under fast (≈daily)
     // compounding the ≥30-day-old snapshot the 30d window needs is still retained (not yet evicted).
     // Sparse compounding is unaffected — the ring just spans a longer wall-clock period.
@@ -393,10 +392,15 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         // measured — existing holders get the NAV bump first; the depositor buys in at the
         // post-compound price. Runs ahead of the retain0/1 snapshot so compound-consumed
         // balances are never double-counted. Direct internal call: deposit and compound share
-        // fate by design (the leg is argument-free with hard internal bounds, and the public
-        // compound() reproduces any revert loudly for diagnosis).
+        // fate by design (the leg is argument-free with hard internal bounds).
+        //
+        // The positionLiquidity() gate is LOAD-BEARING, not an optimization: V4 reverts a
+        // zero-delta modifyLiquidity poke on a nonexistent position, so without it a ≥$100
+        // donation to a virgin vault would make the FIRST deposit trigger a reverting compound
+        // — permanently bricking the vault for $100 (nothing can lower claimable). With the
+        // gate, pre-seed donations sit retained and fold into the first post-seed compound.
         (,, uint256 claimableUsdc,) = compoundClaimable();
-        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC) {
+        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC && positionLiquidity() > 0) {
             _compound();
         }
 
@@ -496,29 +500,21 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                                  COMPOUND
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Compound the vault's accrued value into position liquidity: harvests pool fees,
+    /// @dev Compound the vault's accrued value into position liquidity: harvests pool fees,
     /// internally rebalances against the vault's OWN pool (swapping ~half the value-imbalance,
     /// input-capped to REBALANCE_CAP_MULT × this harvest's fresh fees and bounded to a ≤5% price
     /// move — the capped/unfilled remainder folds forward), and reinvests everything (harvested
     /// fees + retained balances) with NO fee of any kind, minting NO shares (NAV/share rises).
-    /// @dev Permissionless but UNINCENTIVIZED: the primary path is deposit()'s automatic trigger
-    /// at `AUTO_COMPOUND_MIN_USDC`; anyone may also call this directly (e.g. in a quiet market
-    /// with no deposit flow) — the caller simply pays the gas and every unit reinvests for
-    /// holders. No threshold applies here: a below-threshold call only spends the caller's own
-    /// gas (the rebalance is fee-scaled, so dust harvests never trade retained balances). The
-    /// rebalance is foolproof without caller input: the swap is small, runs in the vault's own
-    /// pool (it largely pays the fee to itself as LP), and is hard-bounded by sqrtPriceLimitX96 —
-    /// sandwiching it is unprofitable.
-    function compound() external nonReentrant returns (uint128 liquidityAdded) {
-        return _compound();
-    }
-
-    /// @dev The compound leg shared by both paths: deposit()'s automatic trigger (a direct
-    /// internal call — the caller already holds the reentrancy lock) and the guarded external
-    /// compound() above. Guards live only on the external entrypoints.
+    /// There is NO external compound entrypoint: compounding is purely a side effect of deposits
+    /// (this is reached only from deposit()'s trigger, which holds the reentrancy lock and has
+    /// checked both the threshold and that the position exists). Anyone who wants to force a
+    /// compound in a quiet market simply makes a small deposit. The rebalance is foolproof
+    /// without caller input: the swap is small, runs in the vault's own pool (it largely pays
+    /// the fee to itself as LP), and is hard-bounded by sqrtPriceLimitX96 — sandwiching it is
+    /// unprofitable.
     function _compound() internal returns (uint128 liquidityAdded) {
-        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: every calling
-        // entrypoint is nonReentrant, the V4 flash-accounting is fully settled by now, and the
+        // _snapshotFeeGrowth() writes ring state AFTER this unlock — benign: the only caller
+        // (deposit) is nonReentrant, the V4 flash-accounting is fully settled by now, and the
         // writes are informational only.
         // slither-disable-next-line reentrancy-benign
         bytes memory res = poolManager.unlock(abi.encode(Action.COMPOUND, bytes("")));
@@ -534,8 +530,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     // slither-disable-start timestamp
 
     /// @dev Append the current L/share to the daily ring buffer, at most once per UTC day. Reached only
-    /// after a real compound (the sub-$1 early-return above skips it, since L/share didn't move). The
-    /// snapshot is purely informational — it feeds feeApr() and changes no vault accounting.
+    /// after a real compound (deposits below the auto-compound trigger never enter the leg, so L/share
+    /// didn't move). The snapshot is purely informational — it feeds feeApr() and changes no accounting.
     function _snapshotFeeGrowth() private {
         uint256 supply = totalSupply();
         // slither-disable-next-line incorrect-equality

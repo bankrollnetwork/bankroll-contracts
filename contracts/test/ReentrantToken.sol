@@ -5,18 +5,20 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 interface IReentryTarget {
     function redeem(uint256 shares, address receiver) external returns (uint256, uint256);
-    function compound() external returns (uint128);
+    function deposit(uint256 vltAmount, uint256 usdcAmount, uint256 minShares, uint256 deadline, address recipient)
+        external
+        returns (uint256);
 }
 
 /// @dev A hostile ERC-20 that attempts to re-enter the vault from inside a token
 /// transfer (the ERC-777-style hook surface). Used to prove the guard blocks re-entry:
-/// while the vault is mid-deposit (the guarded _deposit body), any vault token movement
-/// fires (per `mode`) a reentrant `redeem()` or `compound()` — both must revert with
+/// while the vault is mid-deposit, any vault token movement fires (per `mode`) a
+/// reentrant `redeem()` or `deposit()` — both must revert with
 /// ReentrancyGuardReentrantCall(). We capture the revert data so the test can assert
 /// the exact error.
 contract ReentrantToken is ERC20 {
     uint8 public constant MODE_REDEEM = 0;
-    uint8 public constant MODE_COMPOUND = 1;
+    uint8 public constant MODE_DEPOSIT = 1;
 
     uint8 private immutable _decimals;
     address public target;
@@ -55,8 +57,8 @@ contract ReentrantToken is ERC20 {
         if (armed && target != address(0)) {
             armed = false; // single-shot: fire on the first transfer after arming
             reentryAttempted = true;
-            if (mode == MODE_COMPOUND) {
-                try IReentryTarget(target).compound() {
+            if (mode == MODE_DEPOSIT) {
+                try IReentryTarget(target).deposit(1, 1, 0, type(uint256).max, address(this)) {
                     reentryReverted = false;
                 } catch (bytes memory err) {
                     reentryReverted = true;

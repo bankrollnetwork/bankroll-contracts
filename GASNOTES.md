@@ -1,13 +1,14 @@
 # Gas notes: deposit-triggered auto-compound (branch-only notes)
 
-Final design on this branch: **deposit-triggered compounding with no fee of any kind** —
+Final design on this branch: **deposit-triggered compounding with no fee of any kind and NO
+compound entrypoint** — the external write surface is `deposit` + `redeem`, full stop.
 `deposit()` (external, `nonReentrant`) checks `compoundClaimable()` and, at
-`AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant), calls the internal `_compound()` directly.
-`compound()` (external, `nonReentrant`, UNINCENTIVIZED) wraps the same leg — anyone may call it
-(quiet-market safety valve) but earns nothing; 100% of every harvest reinvests for holders.
+`AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) with the position existing (the pre-seed
+gate — see AUDIT.MD §7d M-01), calls the internal `_compound()` directly. 100% of every
+harvest reinvests for holders; a small deposit is the manual compound in a quiet market.
 Guards live only on the external entrypoints. Deposit and compound share fate by design: a
 reverting compound leg reverts the triggering deposit (the leg is argument-free with hard
-internal bounds, and the public compound() reproduces any revert loudly for diagnosis).
+internal bounds).
 
 Measured with `test/gas.autocompound.test.js` (local PoolManager, solc 0.8.26 viaIR, cancun):
 
@@ -31,6 +32,6 @@ Correctness observations:
   MINIMUM_LIQUIDITY).
 - Known tradeoff: with no incentive, compounding normally rides on deposit flow — quiet
   markets defer reinvestment (value-neutral: deposit/redeem retain accrued fees for all
-  holders). Anyone can call the public compound() as a gas donation to close the gap.
+  holders). Anyone can force a compound with a small deposit in a quiet market.
 - Event change: `Compound(uint256 vltFees, uint256 usdcFees, uint128 liquidityAdded)` — topic0
   `0x9bc6dc46…`; DefiLlama/Dune adapters updated (supply-side == fees, keeper query deleted).

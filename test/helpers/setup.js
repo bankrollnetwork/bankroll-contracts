@@ -127,8 +127,8 @@ async function deployVaultFixture(overrides = {}) {
   const Vault = await ethers.getContractFactory("VltUsdcVault");
   const vault = await Vault.deploy(poolManager.target, poolKey, usdc.target);
   await vault.waitForDeployment();
-  // compound()'s min-value gate is a fixed $1 constant (no setter). Fee-generating compound tests
-  // accrue well past $1; the below-gate path is covered by the "nothing accrued" no-op test.
+  // The auto-compound trigger is a fixed $100 constant (no setter). Compound tests accrue past
+  // it via accrueFeesTo(); the below-trigger path is covered by the no-compound deposit test.
 
   // 8. PERIPHERY: external VLT market (mock) + the ZapHelper that converts a USDC-only deposit
   //    into the balanced pair by buying VLT from that market (the buy-pressure flywheel). The
@@ -232,10 +232,10 @@ async function redeem(ctx, user, shares, receiver) {
   return ctx.vault.connect(user).redeem(BigInt(shares), receiver ?? user.address);
 }
 
-// Once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC ($100), ANY deposit runs the vault's
-// internal _compound() leg before its own liquidity add — the primary compound path. A small
-// deposit by `user` is the canonical trigger; 100% of the harvest reinvests (no fee). The
-// public compound() wraps the same leg (unincentivized safety valve).
+// Once compoundClaimable() reaches AUTO_COMPOUND_MIN_USDC ($100) and the position exists,
+// ANY deposit runs the vault's internal _compound() leg before its own liquidity add — the
+// ONLY compound path (there is no compound entrypoint). A small deposit by `user` is the
+// canonical trigger; 100% of the harvest reinvests (no fee).
 async function triggerCompound(ctx, user, usdcAmount) {
   const amt = usdcAmount ?? 10n * 10n ** BigInt(ctx.cfg.usdcDecimals);
   return deposit(ctx, user, amt);
