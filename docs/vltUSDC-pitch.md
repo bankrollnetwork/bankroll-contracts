@@ -66,7 +66,7 @@ vltUSDC is an ERC-20 share over a single full-range Uniswap V4 VLT/USDC position
 - **Fully ownerless.** There is no owner, no admin role, no pause, no sweep — every parameter is a constant or fixed at deploy; deposit/redeem are permissionless and compounding rides on deposits. Nobody, including the deployer, holds any key over the vault.
 - **Solvent by construction.** Shares are liquidity claims; in-kind redemption can't exceed what's in the pool.
 - **Oracle-free.** Liquidity-denominated shares plus in-kind exit remove every price-manipulation surface.
-- **Hardened entrypoints.** Reentrancy guards, SafeERC20, checks-effects-interactions, first-deposit lock, deadlines and slippage bounds on entry, and a hard-capped compound rebalance (fee-scaled notional, ≤5% price move).
+- **Hardened entrypoints.** Reentrancy guards, SafeERC20, checks-effects-interactions, first-deposit lock, deadlines and slippage bounds on entry, and a compound rebalance bounded to a ≤5% price move (unfilled remainder folds forward).
 - **Exit always open.** Nothing in the system is pausable — redemption least of all.
 
 ## Risk Surface

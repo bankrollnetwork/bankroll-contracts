@@ -339,7 +339,7 @@ describe("VltUsdcVault — core flows", () => {
       expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
     });
 
-    it("rebalance swap is capped by fresh fees: a one-sided donation alone is never swapped", async () => {
+    it("a one-sided donation is rebalanced and reinvested by the next trigger (no fresh fees needed)", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await fundUsdc(ctx, ctx.alice, USDC(10000));
       await (await deposit(ctx, ctx.alice, USDC(10000))).wait();
@@ -348,22 +348,21 @@ describe("VltUsdcVault — core flows", () => {
       const donation = USDC(150);
       await (await ctx.usdc.mint(ctx.vault.target, donation)).wait();
 
-      // The next deposit triggers the compound leg, but this harvest collects ~0 fees, so the
-      // rebalance cap (REBALANCE_CAP_MULT × fresh fees) is 0: the vault must never trade held
-      // balances at spot without freshly-accrued fees sizing the swap. One-sided → nothing can
-      // be placed either, so the leg runs but reinvests nothing and the donation folds forward.
+      // The next deposit triggers the compound leg, which swaps ~half the imbalance (bounded
+      // only by the ≤5% price limit) and reinvests — claimable drops back under the trigger,
+      // so the value never sits idle and never taxes later depositors.
+      const lBefore = await ctx.vault.positionLiquidity();
       const rc = await (await triggerCompound(ctx, ctx.bob)).wait();
       const cmp = await getEvent(ctx.vault, rc, "Compound");
-      expect(cmp.liquidityAdded).to.equal(0n);
-      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.equal(donation); // untouched
-      expect(await ctx.vlt.balanceOf(ctx.vault.target)).to.equal(0n); // no swap happened
-
-      // Once fresh fees exist the (fee-scaled) rebalance runs and the donation starts folding in.
-      await generateFees(ctx, { rounds: 4 });
-      const lBefore = await ctx.vault.positionLiquidity();
-      await (await triggerCompound(ctx, ctx.bob)).wait();
+      expect(cmp.liquidityAdded).to.be.greaterThan(0n); // the donation was placed
       expect(await ctx.vault.positionLiquidity()).to.be.greaterThan(lBefore);
-      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(donation);
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(USDC(5)); // dust only
+      const [, , claimAfter] = await ctx.vault.compoundClaimable();
+      expect(claimAfter).to.be.lessThan(USDC(100));
+
+      // No repeat gas tax: the follow-up deposit is below the trigger and does NOT compound.
+      const rc2 = await (await deposit(ctx, ctx.carol, USDC(1000))).wait();
+      expect(hasEvent(ctx.vault, rc2, "Compound")).to.equal(false);
     });
 
     it("trigger threshold is a fixed $100 constant with no setter", async () => {

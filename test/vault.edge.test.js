@@ -189,20 +189,14 @@ describe("VltUsdcVault — edge cases, abuse & admin", () => {
       const rc = await (await deposit(ctx, ctx.alice, USDC(1000))).wait();
       expect(findEvent(ctx.vault, rc, "Compound")).to.equal(null); // gated — no compound leg
       expect(await ctx.vault.balanceOf(ctx.alice.address)).to.be.greaterThan(0n);
-      // The donation sits retained for holders (a one-sided donation alone is never swapped —
-      // the rebalance cap scales with FRESH fees, which are still zero).
+      // The donation sits retained for holders until a position exists to reinvest into.
       expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.equal(USDC(150));
 
-      // Once fresh fees exist, the next deposit's compound leg starts folding the donation in.
-      const c0Dec = ctx.usdcIsCurrency0 ? ctx.cfg.usdcDecimals : ctx.cfg.vltDecimals;
-      const c1Dec = ctx.usdcIsCurrency0 ? ctx.cfg.vltDecimals : ctx.cfg.usdcDecimals;
-      for (let i = 0; i < 3; i++) {
-        await (await swapExact(ctx, ctx.seeder, true, 2000n * 10n ** BigInt(c0Dec))).wait();
-        await (await swapExact(ctx, ctx.seeder, false, 2000n * 10n ** BigInt(c1Dec))).wait();
-      }
+      // The very next deposit folds it in: the rebalance needs no fresh fees (bounded only by
+      // the ≤5% price limit), so the donation reinvests immediately once the vault is seeded.
       const rc2 = await (await deposit(ctx, ctx.bob, USDC(1000))).wait();
       expect(findEvent(ctx.vault, rc2, "Compound")).to.not.equal(null); // now it compounds
-      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(USDC(150));
+      expect(await ctx.usdc.balanceOf(ctx.vault.target)).to.be.lessThan(USDC(5));
     });
   });
 

@@ -26,7 +26,8 @@ pragma solidity 0.8.26;
         write surface is deposit and redeem, full stop — compounding is purely
         a side effect of deposits (a small deposit forces one in a quiet
         market). Deposit and compound share fate by design — the leg is
-        argument-free with hard internal bounds. Staleness is value-neutral —
+        argument-free and its swap is bounded to a ≤5% price move (unfilled
+        remainder folds forward). Staleness is value-neutral —
         deposit/redeem already retain accrued fees for all holders, and
         everything folds forward into the next compound.
       - Fee retention: V4 folds a position's FULL accrued fees into callerDelta
@@ -92,22 +93,14 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// @dev The compound leg's internal rebalance swap is bounded to a <=5% pool-price move via
     /// `sqrtPriceLimitX96`. Because price = sqrtP^2, the sqrt-space factors are sqrt(0.95) and
     /// sqrt(1.05) (×BPS). The swap fills as much as fits inside this bound; any unfilled remainder
-    /// folds forward into the next compound. NOTE: this bounds the price impact OF THE VAULT'S OWN
-    /// SWAP, not a prior manipulation — the filled portion executes at the prevailing (possibly
-    /// skewed) spot price. The at-risk notional per compound is therefore separately capped to
-    /// REBALANCE_CAP_MULT × this harvest's fresh fees (see _rebalance), so a manipulated price can
-    /// only defer reinvestment or skew a fresh-fee-sized swap — never expose accumulated balances.
+    /// folds forward into the next compound. This bounds the price impact OF THE VAULT'S OWN SWAP
+    /// — the filled portion executes at the prevailing spot price. Executing at a manipulated spot
+    /// is uneconomic to induce: the at-risk notional is the vault's loose balance, which the $100
+    /// deposit trigger keeps at trigger scale under any deposit flow, while pushing-then-restoring
+    /// the full-range 1% pool costs fees on a far larger notional that accrue mostly to the vault
+    /// itself as the dominant LP.
     uint256 internal constant SQRT_LIMIT_DOWN_BPS = 9747;  // ceil(sqrt(0.95) * 10000) → ≤5% drop
     uint256 internal constant SQRT_LIMIT_UP_BPS = 10246;   // floor(sqrt(1.05) * 10000) → ≤5% rise
-
-    /// @dev Cap on the rebalance swap's input per compound: REBALANCE_CAP_MULT × the value of THIS
-    /// call's freshly-harvested pool fees (expressed in the input currency at spot). The swap
-    /// executes at the prevailing spot price, so without a cap a price-manipulator could expose the
-    /// vault's FULL accumulated retained balance to a skewed price in one compound; with it, the
-    /// worst-case skewed notional is a small multiple of what just accrued. Imbalance beyond the
-    /// cap folds forward across compounds — under
-    /// steady fee accrual a 4× multiple works down any realistic retained imbalance in a few calls.
-    uint256 internal constant REBALANCE_CAP_MULT = 4;
 
     /// @notice Claimable value (USDC, 6-dec) at which deposit() runs its best-effort auto-compound
     /// before measuring the depositor's liquidity. A fixed, ungoverned constant — no admin setter,
@@ -495,9 +488,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
 
     /// @dev Compound the vault's accrued value into position liquidity: harvests pool fees,
     /// internally rebalances against the vault's OWN pool (swapping ~half the value-imbalance,
-    /// input-capped to REBALANCE_CAP_MULT × this harvest's fresh fees and bounded to a ≤5% price
-    /// move — the capped/unfilled remainder folds forward), and reinvests everything (harvested
-    /// fees + retained balances) with NO fee of any kind, minting NO shares (NAV/share rises).
+    /// bounded to a ≤5% price move — the unfilled remainder folds forward), and reinvests
+    /// everything (harvested fees + retained balances) with NO fee of any kind, minting NO
+    /// shares (NAV/share rises).
     /// There is NO external compound entrypoint: compounding is purely a side effect of deposits
     /// (this is reached only from deposit()'s trigger, which holds the reentrancy lock and has
     /// checked both the threshold and that the position exists). Anyone who wants to force a
@@ -734,12 +727,11 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         if (fee1 > 0) poolManager.take(currency1, address(this), fee1);
 
         // 3. Internally rebalance toward the pool ratio so both sides can enter the position.
-        //    _rebalance computes the direction + size (≈half the value-imbalance), caps the input
-        //    to REBALANCE_CAP_MULT × this harvest's fresh fees (bounding the notional exposed to
-        //    a possibly-skewed spot price), and bounds its own price impact to ≤5%; any
-        //    unfilled/capped remainder folds forward into the next compound. No caller input,
-        //    no minSwapOut.
-        _rebalance(_selfBalance(currency0), _selfBalance(currency1), fee0, fee1);
+        //    _rebalance computes the direction + size (≈half the value-imbalance) and bounds its
+        //    own price impact to ≤5% via sqrtPriceLimitX96; any unfilled remainder folds forward
+        //    into the next compound. No caller input, no minSwapOut — the loose balance being
+        //    rebalanced is trigger-scale by construction (see SQRT_LIMIT_* notes).
+        _rebalance(_selfBalance(currency0), _selfBalance(currency1));
 
         // 4. Reinvest the FULL vault balance — this harvest PLUS retained deposit/redeem fees and
         //    prior compound dust, 100% of it, with no fee carved out for anyone. Mints NO shares
@@ -807,13 +799,13 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     }
 
     /// @dev Compute and execute the compound rebalance swap: move ~half the value-imbalance from
-    /// the heavy side to the light side so both can enter the full-range position. Two independent
-    /// bounds, no caller input: (1) the input is capped to REBALANCE_CAP_MULT × the value of this
-    /// harvest's fresh pool fees (`fee0`/`fee1`), so a skewed spot price can only ever taint a
-    /// fresh-fee-sized notional, never the full retained balance; (2) the swap's own price impact
-    /// is bounded to a ≤5% move via `sqrtPriceLimitX96`, so it may partially fill. Any capped or
-    /// unfilled remainder simply stays in the vault and folds forward into the next compound.
-    function _rebalance(uint256 r0, uint256 r1, uint256 fee0, uint256 fee1) internal {
+    /// the heavy side to the light side so both can enter the full-range position. One bound, no
+    /// caller input: the swap's own price impact is limited to a ≤5% move via `sqrtPriceLimitX96`,
+    /// so it may partially fill; any unfilled remainder simply stays in the vault and folds
+    /// forward into the next compound. The notional is inherently small — the vault's loose
+    /// balance, which the deposit trigger clears at ~$100 scale (see the SQRT_LIMIT_* notes for
+    /// why executing it at a manipulated spot is uneconomic to induce).
+    function _rebalance(uint256 r0, uint256 r1) internal {
         // slither-disable-next-line unused-return
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
         uint256 sp = uint256(sqrtPriceX96);
@@ -835,16 +827,8 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
             amountIn = (r0 > value1InCcy0 ? r0 - value1InCcy0 : 0) / 2;
         }
 
-        // Cap the input to REBALANCE_CAP_MULT × the value of this harvest's fresh pool fees,
-        // expressed in the input currency at spot (same conversions as above). Bounds the notional
-        // that can execute at a manipulated price; the remainder folds forward.
-        uint256 cap = zeroForOne
-            ? REBALANCE_CAP_MULT * (fee0 + FullMath.mulDiv(FullMath.mulDiv(fee1, Q96, sp), Q96, sp))
-            : REBALANCE_CAP_MULT * (fee1 + FullMath.mulDiv(FullMath.mulDiv(fee0, sp, Q96), sp, Q96));
-        if (amountIn > cap) amountIn = cap;
-
         // slither-disable-next-line incorrect-equality
-        if (amountIn == 0) return; // already balanced, only dust, or no fresh fees — nothing to swap
+        if (amountIn == 0) return; // already balanced or only dust — nothing to swap
 
         // Bound the pool-price move to ≤5% in sqrt-space, clamped to the valid band.
         uint256 limit = zeroForOne

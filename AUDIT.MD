@@ -200,8 +200,22 @@ manipulation). Regression test: `vault.flows.test.js` — "rebalance swap is cap
 fees: a one-sided donation alone is never swapped."
 
 **Note (July 14, 2026 — §7d):** `compound()` no longer exists as an entrypoint; the same logic
-is the internal `_compound()` leg triggered by deposits. The rebalance cap and price-bound
-analysis above applies unchanged.
+is the internal `_compound()` leg triggered by deposits.
+
+**Remediation revisited (July 14, 2026 — cap REMOVED):** `REBALANCE_CAP_MULT` was deleted
+under the keeperless design, deliberately. Two reasons. (1) It was ineffective as a defense:
+it bounded only the swap leg while `_addLiquidity()` always deployed the full loose balance
+at spot — the independent Codex review's I-02 probe extracted value through the add leg with
+the cap active, so the cap bounded half of one exposure. (2) It caused real harm: the trigger
+fires on total claimable value, so one-sided value with no fresh fees re-triggered a paid
+no-op compound on every deposit (a $101 one-sided donation = standing gas tax) while the
+value sat idle outside redeemable principal. The operative bound is structural and is the
+one this finding's economics already relied on: the $100 deposit trigger keeps loose
+balances at trigger scale under any deposit flow, push/restore manipulation pays 1% pool
+fees on a far larger notional mostly to the vault itself, and the ≤5% `sqrtPriceLimitX96`
+bounds the vault's own impact (unfilled remainder folds forward). The donation regression
+test was inverted accordingly ("a one-sided donation is rebalanced and reinvested by the
+next trigger").
 
 ### L-02 — `zap()` sends the unspent-input refund to `recipient`, not to the caller
 
@@ -623,6 +637,14 @@ The former exact-issuance test was replaced by a socialization-semantics test. T
 narrows I-10's JIT-capture window: above the $100 trigger, pending value is crystallized
 into L *before* the joiner's shares are priced.
 
+**Cap removal (same day):** `REBALANCE_CAP_MULT` and the fresh-fee sizing of the rebalance
+swap were removed — see the L-01 "Remediation revisited" note for the full rationale
+(ineffective: the add leg was never capped, per Codex I-02; harmful: one-sided claimable
+value re-triggered paid no-op compounds and idled outside redeemable principal). The
+rebalance now works the whole loose balance, bounded by the ≤5% price limit; the trigger and
+the leg share the same value base by construction. Slither/Solhint re-run post-removal:
+0 results / clean; gas within noise of the table in `GASNOTES.md`.
+
 **Verification.** 61 tests passing (fee-less compound asserted exactly: trigger depositor's
 wallet delta == deposit refund; Compound event == full gross harvest; NAV/share monotonic
 under pre-trigger price pushes; below-threshold deposits provably skip the leg). Gas:
@@ -675,7 +697,7 @@ detectors); Solhint clean.**
 | Slither clean / Solhint clean | Pass |
 | Deadline parameters on time-sensitive entrypoints | Pass (fixed — L-03) |
 | Refund routing in periphery `zap()` | Pass (fixed — L-02) |
-| Rebalance notional capped independently of retained balance | Pass (fixed — L-01) |
+| Rebalance exposure bounded (≤5% price limit; loose balances structurally trigger-scale — L-01 revisited, §7d) | Pass |
 | Pre-seed donation cannot brick the first deposit | Pass (fixed — §7d M-01) |
 | Exact dependency pinning in manifest | Fail (Info — I-09) |
 | Independent third-party audit | Pending (Shieldify) |
@@ -694,8 +716,9 @@ semantics — are all handled correctly and covered by targeted tests.
 **No Critical, High, or Medium issues were found in the July 8 review.** (The July 14
 keeperless redesign later introduced **and fixed pre-deployment** one Medium — M-01, §7d.)
 The three Low findings — a
-fresh-fee-scaled cap on the compound rebalance notional (plus an honest restatement of its
-price-bound guarantee), refund routing in `zap()`, and deadlines on `deposit`/`zapDeposit` —
+fresh-fee-scaled cap on the compound rebalance notional (later removed as ineffective —
+see L-01's "Remediation revisited"), refund routing in `zap()`, and deadlines on
+`deposit`/`zapDeposit` —
 **have all been fixed and regression-tested** (see the Resolution notes in §5; Slither 0,
 47 tests passing post-fix). The informational items are predominantly conscious design
 choices that should simply be re-confirmed during the independent review.

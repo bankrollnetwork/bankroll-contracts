@@ -76,6 +76,15 @@ Keep the design if this is the intended policy, but document it directly:
 
 ### Description
 
+> **Project note (July 14, 2026, later the same day — added by the project, not by Codex):**
+> acting on exactly this observation, `REBALANCE_CAP_MULT` was subsequently REMOVED — since
+> the cap never bounded the add-liquidity leg, it bounded half of one exposure while making
+> one-sided claimable value idle (and re-trigger paid no-op compounds) whenever fresh fees
+> were small. The rebalance now swaps ~half the whole loose balance's imbalance, bounded only
+> by the ≤5% price limit; the structural bound this finding relies on (trigger-scale loose
+> balances + pool-fee economics) is unchanged, and this note's monitoring recommendation
+> stands. See `AUDIT.MD` L-01 "Remediation revisited" and §7d.
+
 The rebalance cap limits the swap leg, not the later add-liquidity leg. After `_rebalance()`, `_onCompound()` passes the vault's full token balance into `_addLiquidity()`, and `_addLiquidity()` computes liquidity at the current pool price.
 
 This means retained/off-position balances waiting for the next internal compound can be deployed at live spot. Under the accepted model, that is not a practical vulnerability because the affected amount should be marginal compared with principal: once it is worth folding in, deposit flow triggers the compound leg. Manipulating the local 1% pool also requires paying pool fees on the price push and likely on the restore, with a large portion accruing to the vault when it is the dominant LP.

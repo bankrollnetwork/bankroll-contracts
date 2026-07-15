@@ -6,19 +6,21 @@ compound entrypoint** — the external write surface is `deposit` + `redeem`, fu
 `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) with the position existing (the pre-seed
 gate — see AUDIT.MD §7d M-01), calls the internal `_compound()` directly. 100% of every
 harvest reinvests for holders; a small deposit is the manual compound in a quiet market.
+The rebalance swaps ~half the value-imbalance of the WHOLE loose balance, bounded only by
+the ≤5% `sqrtPriceLimitX96` (the fresh-fee `REBALANCE_CAP_MULT` was removed — see AUDIT.MD
+§7d — so trigger and action share the same value base and one-sided value never idles).
 Guards live only on the external entrypoints. Deposit and compound share fate by design: a
-reverting compound leg reverts the triggering deposit (the leg is argument-free with hard
-internal bounds).
+reverting compound leg reverts the triggering deposit (the leg is argument-free).
 
 Measured with `test/gas.autocompound.test.js` (local PoolManager, solc 0.8.26 viaIR, cancun):
 
 | Scenario | pre-branch baseline | this design | Δ |
 |---|---|---|---|
-| Quiet direct deposit (below trigger) | 221,489 | 237,891 | **+16.4k** standing view-check tax |
-| Direct deposit, ≥$100 claimable (compound fires) | 315,428 | 481,504 | +165k on the triggering deposit |
-| Deposit right after a trigger | 221,538 | 237,943 | +16.4k (back to quiet cost) |
-| Quiet zapDeposit | 382,816 | 395,920 | +13.1k |
-| zapDeposit, ≥$100 claimable (compound fires) | 426,099 | 572,731 | +147k |
+| Quiet direct deposit (below trigger) | 221,489 | 237,908 | **+16.4k** standing view-check tax |
+| Direct deposit, ≥$100 claimable (compound fires) | 315,428 | 483,173 | +165k on the triggering deposit |
+| Deposit right after a trigger | 221,538 | 237,960 | +16.4k (back to quiet cost) |
+| Quiet zapDeposit | 382,816 | 395,934 | +13.1k |
+| zapDeposit, ≥$100 claimable (compound fires) | 426,099 | 574,411 | +148k |
 
 (The removed keeper path used to cost 418k for `compound()` + 222k for the deposit = 640k across
 two txs; dropping the finder payout then shaved another ~15k off the triggering deposit.)
