@@ -8,6 +8,16 @@
 | Date | July 10, 2026 |
 | Context | Second-opinion review of the current workspace. `AUDIT.MD` was read after the independent code pass and used as a cross-check. |
 
+> **Project addendum (July 14, 2026 — added by the project, not by Codex; Codex's text below
+> is unmodified).** This review examined the pre-redesign code, whose compounding model was a
+> permissionless keeper `compound()` with a 1% finder fee. That model no longer exists: the
+> July 14 keeperless redesign (see `AUDIT.MD` §7d) removed the compound entrypoint and the
+> fee entirely — the external write surface is now `deposit` + `redeem`, and a deposit at
+> ≥$100 claimable runs the internal compound leg (100% reinvests) before its shares are
+> priced. Where this review says "keeper cadence," read "deposit-triggered cadence at the
+> $100 threshold." Per-finding mapping notes are inlined below; the findings' code-path
+> analysis (especially I-02) largely carries over.
+
 ## Executive Summary
 
 The core contracts are compact, ownerless, and well tested. The basic V4 settlement paths, first-depositor lock, direct-donation handling, deadline checks, token-named events, and periphery refund routing are all materially better than a typical early vault implementation.
@@ -91,6 +101,14 @@ Keep the design if this is the intended policy, but document it directly:
 
 Also consider adding monitoring around `compoundClaimable().valueUsdc` so the "small local profits" assumption stays true in production.
 
+> **Project note (July 14, 2026 — §7d):** the redesign directly narrows this finding's
+> deposit side: a deposit at ≥$100 claimable now crystallizes pending/retained value into L
+> *before* its shares are priced, so the entrant-side timing window is bounded by the $100
+> trigger rather than by keeper cadence. The redeem-side forfeit (leaver's pending fees stay
+> with remaining holders) is unchanged and remains the documented long-term-holder policy.
+> The recommended documentation now lives in the contract header, README, and `AUDIT.MD`
+> §7d/I-10.
+
 ## I-02: Retained balances can be deployed at live spot during `compound()`, but manipulation should be uneconomic under keeper cadence
 
 **Severity:** Informational
@@ -150,6 +168,17 @@ No mandatory code change if the keeper/gas model is accepted. Recommended docume
 - re-evaluate if retained balances regularly exceed a small fraction of position principal;
 - optionally cap total retained value deployed per compound if future operations show keeper liveness is weaker than expected.
 
+> **Project note (July 14, 2026 — §7d): this finding CARRIES OVER to the keeperless design**
+> — the compound leg still deploys the full retained balance via `_addLiquidity()` at live
+> spot after the fee-scaled swap cap, and an attacker can now self-trigger it with a small
+> deposit (previously by calling `compound()`). What changes is the liveness assumption that
+> bounds the at-risk notional: retained balances are folded in by deposit flow at the $100
+> trigger instead of by keeper economics, so under healthy flow the loose balance stays
+> trigger-scale; in a prolonged no-deposit market it can accumulate exactly as this finding
+> warns. The monitoring recommendation stands (the client's Stats panel now surfaces
+> `compoundClaimable().valueUsdc` and the trigger for this reason), and Codex's economic
+> bound (push + restore pay the 1% pool fee largely to the vault itself) is unchanged.
+
 ## I-03: Ownerless design leaves no operational response path for USDC or PoolManager emergencies
 
 **Severity:** Informational
@@ -164,6 +193,13 @@ The main residual assumptions are:
 - no migration path is needed if the VLT/USDC market moves elsewhere.
 
 This is acceptable if documented clearly. The code should not gain an admin key casually, but users should understand that "ownerless" also means "no emergency lever."
+
+> **Project note (July 14, 2026 — §7d):** still true, and sharpened by the redesign's
+> shared-fate choice: deposit and the compound leg revert together (no try/catch), so a
+> latent compound-leg revert would block threshold-crossing deposits with no lever (redeem
+> is unaffected; exit stays open). Accepted and flagged as the §7d audit-focus item; the
+> related pre-seed-donation brick (M-01) was found and fixed with the `positionLiquidity()`
+> trigger gate.
 
 ## I-04: Permit2 residual allowance cleanup is not recommended if ZapHelper remains a transient proxy
 
@@ -191,6 +227,12 @@ I agree with much of the architectural review in `AUDIT.MD`, especially the V4 f
 3. Monitor retained balances and keeper cadence in production.
 4. Document I-04 as the accepted ZapHelper transient-proxy allowance model.
 5. Re-run Hardhat tests, Slither, and the fork tests on the final pre-deploy commit.
+
+> **Project note (July 14, 2026):** items 1–3 are re-scoped by the keeperless redesign —
+> I-01/I-02 documentation now lives in the contract header, README, and `AUDIT.MD` §7d, and
+> "keeper cadence" monitoring becomes claimable-value monitoring (surfaced in the test
+> client's Stats panel). Item 5 was re-run July 14 on the keeperless code: 61 tests passing,
+> Slither 0 results, Solhint clean.
 
 ## Final Assessment
 
