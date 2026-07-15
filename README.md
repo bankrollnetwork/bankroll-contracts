@@ -377,7 +377,7 @@ justifications, so Solhint/Slither stay clean.
 What this workspace does **not** yet do:
 
 1. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
-   the V4 fee-settlement path (BUG-1) and that the `feesAccrued`/principal split is complete
+   the V4 fee-settlement path (the fee-retention split) and that the `feesAccrued`/principal split is complete
    across every callback; the **deposit-triggered auto-compound** (see AUDIT.MD §7d: the
    internal `_compound()` leg with no external entrypoint, the shared-fate coupling — a
    reverting compound leg blocks threshold-crossing deposits — the M-01 pre-seed gate, the
