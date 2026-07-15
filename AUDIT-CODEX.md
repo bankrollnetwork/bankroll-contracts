@@ -15,8 +15,9 @@
 > fee entirely — the external write surface is now `deposit` + `redeem`, and a deposit at
 > ≥$100 claimable runs the internal compound leg (100% reinvests) before its shares are
 > priced. Where this review says "keeper cadence," read "deposit-triggered cadence at the
-> $100 threshold." Per-finding mapping notes are inlined below; the findings' code-path
-> analysis (especially I-02) largely carries over.
+> $100 threshold." Its line citations reference the code as reviewed (`main` @ `6614b14`),
+> not the current source. Per-finding mapping notes are inlined below; the findings'
+> code-path analysis (especially I-02) largely carries over.
 
 ## Executive Summary
 

@@ -385,8 +385,8 @@ What this workspace does **not** yet do:
    inertness); and the **ZapHelper / external-sourcing
    path** (deposit's dependency on VLT's external market, the
    arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
-   NOTE: `AUDIT.MD` §§1–7 line citations were pinned against `6d76648`; §7d covers the
-   keeperless redesign. Re-run Slither (`npm run slither`) + the suite after any change.
+   NOTE: `AUDIT.MD` line citations are anchored to `main` @ `f6c6e88` (July 14, 2026) —
+   re-verify them, plus Slither (`npm run slither`) + the suite, after any contract change.
 2. **Mainnet pool init + deploy + verify** — requires a funded key + archive RPC; the scripts
    above are ready. Publish the vault address into the pitch's Parameters table afterward.
 
