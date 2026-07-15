@@ -5,7 +5,7 @@ pragma solidity 0.8.26;
                               vltUSDC VAULT
     Tokenized, auto-compounding Uniswap V4 VLT/USDC LP position.
 
-    Design (as converged):
+    Design:
       - Holds ONE full-range V4 position (VLT/USDC, 1% fee tier).
       - Shares are denominated in the position's LIQUIDITY (L), not dollars.
         => no oracle anywhere. Mint/redeem never price a token.
@@ -29,29 +29,22 @@ pragma solidity 0.8.26;
         argument-free with hard internal bounds. Staleness is value-neutral —
         deposit/redeem already retain accrued fees for all holders, and
         everything folds forward into the next compound.
-
-    STATUS: `_liquidityForAmounts` is now wired to v4-periphery's canonical
-    LiquidityAmounts library (was a revert placeholder). The scaffold-level
-    issues flagged in the completion plan have been addressed:
-      - RedeemData carries `liquidity` (renamed from the misleading `shares`).
-      - The compound leg makes NO external transfer to any caller — the entire
-        harvest reinvests; the only token movements are with the PoolManager.
-      - Compound residual dust is intentionally left to fold forward into the
-        next compound (documented below).
-      - BUG-1 FIX: V4 folds the position's FULL accrued fees into callerDelta on
-        ANY modifyLiquidity. deposit()/redeem() therefore split principal from
-        feesAccrued and retain the fees at address(this) (folding forward to all
-        holders) — no path ever pays fees out; the compound leg converts them to
-        liquidity. Without this, the first party to touch the position after
-        fees accrue would sweep 100% of the uncompounded fees. Covered by
-        test/vault.fees.test.js.
+      - Fee retention: V4 folds a position's FULL accrued fees into callerDelta
+        on ANY modifyLiquidity, so deposit()/redeem() split principal from
+        feesAccrued and retain the fees at address(this) for all holders.
+        Without the split, the first party to touch the position after fees
+        accrue would sweep 100% of the uncompounded fees. No path ever pays
+        fees out — the compound leg converts them to position liquidity.
+        Covered by test/vault.fees.test.js.
+      - Compound residual dust folds forward into the next compound: it is
+        never counted in shares, so it can only ever raise future NAV.
 
     NOTE (read before deploying): the V4 unlock/settle/take delta accounting
     in the callback is the part most likely to contain a sign/settlement bug.
     Every `_settle`/`_take`/`modifyLiquidity` path is exercised by the Hardhat
     suite (test/) against a REAL PoolManager (local deploy + optional mainnet
-    fork). This remains a reviewed scaffold pending the Shieldify audit, not
-    audited code.
+    fork). Not yet independently audited (Shieldify pending) — do not deploy
+    real funds before the audit.
 //////////////////////////////////////////////////////////////////////////*/
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -224,9 +217,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     );
 
     /// @dev Pool fees harvested and RETAINED at the vault for all holders when a deposit() or
-    /// redeem() touches the position (V4 realizes accrued fees on ANY modifyLiquidity — the BUG-1
-    /// split). Without this event those harvests are invisible in the logs, and event-based fee
-    /// accounting would systematically under-report between compounds.
+    /// redeem() touches the position (V4 realizes accrued fees on ANY modifyLiquidity — the fee
+    /// retention split, see the header). Without this event those harvests are invisible in the
+    /// logs, and event-based fee accounting would systematically under-report between compounds.
     event FeesRetained(uint256 vltFees, uint256 usdcFees);
 
     /*//////////////////////////////////////////////////////////////

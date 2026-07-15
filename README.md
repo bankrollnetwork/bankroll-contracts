@@ -9,13 +9,12 @@ replaceable **`ZapHelper`** (periphery) converts a USDC-only deposit into that p
 VLT from its external market** (the buy pressure that lifts VLT's price) via an off-chain Uniswap
 route, then calling the vault. The vault doesn't reference the helper — topology changes only
 ever touch periphery, and a zapper bug can't affect the vault or its holders. See
-[`docs/vltUSDC-pitch.md`](docs/vltUSDC-pitch.md) for the product overview; this workspace
-implements the `vltUSDC-vault-TODO.md` completion plan.
+[`docs/vltUSDC-pitch.md`](docs/vltUSDC-pitch.md) for the product overview.
 
 This is a **standalone** Hardhat workspace; the jQuery/gulp frontend lives in the sibling
 [bankroll-web](https://github.com/bankrollnetwork/bankroll-web) repo.
 
-> **Status:** compiles, fully fork-/PoolManager-tested (54 unit + 2 fork tests), Slither
+> **Status:** compiles, fully fork-/PoolManager-tested (61 unit + 2 opt-in fork tests), Slither
 > clean (0 findings, 96 detectors), Solhint clean, dependencies pinned. **Not yet
 > mainnet-ready** — pending the Shieldify audit (see
 > [Remaining before mainnet](#remaining-before-mainnet)).
@@ -25,7 +24,7 @@ This is a **standalone** Hardhat workspace; the jQuery/gulp frontend lives in th
 ## Layout
 
 ```
-src/contracts/
+bankroll-contracts/
 ├── contracts/
 │   ├── VltUsdcVault.sol          # the vault: balanced VLT+USDC → shares, no external deps
 │   ├── ZapHelper.sol             # PERIPHERY: USDC → buy VLT (off-chain route) → vault.deposit → shares
@@ -46,7 +45,7 @@ src/contracts/
 │   ├── helpers/                  # fixture (real PoolManager + mocks) + math
 │   ├── vault.flows.test.js       # deposit / redeem / auto-compound happy paths
 │   ├── vault.edge.test.js        # edge, abuse, reentrancy, blacklist, admin
-│   ├── vault.fees.test.js        # BUG-1: deposit/redeem retain fees at the vault
+│   ├── vault.fees.test.js        # fee retention: deposit/redeem keep fees at the vault
 │   ├── vault.invariants.test.js  # stateful property harness
 │   ├── scripts.quoter.test.js    # quoter, buy-pressure, external-market sandwich bound
 │   ├── zaphelper.permit2.test.js # ZapHelper Permit2 branch (deterministic, no RPC)
@@ -61,7 +60,7 @@ src/contracts/
 - For live deploys/forking: an archive RPC URL (Alchemy/Infura) and a funded deployer key.
 
 ```bash
-cd src/contracts
+cd bankroll-contracts
 npm install
 cp .env.example .env   # then fill in
 ```
@@ -86,16 +85,16 @@ npm test               # 61 passing (+ opt-in fork suite)
 npm run coverage       # solidity-coverage
 ```
 
-What's covered (maps to the completion plan):
+What's covered:
 
-| Plan item | Where |
+| Area | Where |
 |---|---|
-| Compiles against pinned v4 (Blocker 0) | `npm run build` |
-| `_liquidityForAmounts` wired (Blocker 1) | every deposit/compound test |
-| Zero residual delta on every callback (Blocker 2) | implicit — the PoolManager reverts `CurrencyNotSettled` otherwise, so all passing flow tests prove it |
-| Off-chain quoter (Blocker 3): negligible dust + `minOut` holds under a sandwich | `scripts.quoter.test.js` |
+| Compiles against pinned v4 | `npm run build` |
+| Liquidity math (v4-periphery `LiquidityAmounts`) | every deposit/compound test |
+| Zero residual delta on every callback | implicit — the PoolManager reverts `CurrencyNotSettled` otherwise, so all passing flow tests prove it |
+| Off-chain quoter: negligible dust + `minOut` holds under a sandwich | `scripts.quoter.test.js` |
 | Flows: deposit ΔL/dust, redeem in-kind, auto-compound 100% reinvest / no shares / L up | `vault.flows.test.js`, `vault.edge.test.js` |
-| BUG-1: deposit/redeem retain fees at the vault (don't sweep them to the caller) | `vault.fees.test.js` |
+| Fee retention: deposit/redeem keep fees at the vault (never swept to the caller) | `vault.fees.test.js` |
 | ZapHelper: external sourcing, buy pressure, sandwich bound, Permit2 branch | `scripts.quoter.test.js`, `zaphelper.permit2.test.js` |
 | Invariants: solvency, no-free-shares, compound monotonicity, settlement | `vault.invariants.test.js` |
 | Edge/abuse: `deposit(0)`, redeem>balance, below-threshold deposit (no compound), donation socialization, reentrancy on every entrypoint, blacklisted USDC | `vault.edge.test.js` |
@@ -116,7 +115,8 @@ npm run slither        # Slither — needs the local .venv (see below); exit 0 c
   .venv/bin/pip install "cbor2<5.6" slither-analyzer   # cbor2<5.6 avoids a Rust build on Py3.13
   npm run slither
   ```
-  All 14 raw findings were triaged: 1 was a **real bug (BUG-1, fixed — see below)**; the
+  All 14 raw findings were triaged: 1 was a **real bug** (the V4 fee-sweep issue, handled by
+  the deposit/redeem retention split — see [Key mechanics](#key-mechanics)); the
   other 13 are false positives (intentional tick-spacing snap, `== 0` guards, partial-tuple
   reads, event-after-trusted-call under `nonReentrant`) suppressed with justified inline
   `slither-disable` annotations. Slither now reports **0 results**.
@@ -240,36 +240,29 @@ VAULT_ADDRESS=0x... npx hardhat run scripts/deploy_zaphelper.js   --network loca
 VAULT_ADDRESS=0x... npx hardhat run scripts/02_seed_first_deposit.js --network localhost  # direct VLT+USDC seed
 ```
 
-## Changes applied to the scaffold
+## Key mechanics
 
-All four "fix during implementation" items from the completion plan are done:
-
-- **`_liquidityForAmounts` wired** to v4-periphery `LiquidityAmounts.getLiquidityForAmounts`
+- **Liquidity math** uses v4-periphery's canonical `LiquidityAmounts.getLiquidityForAmounts`
   with `TickMath.getSqrtPriceAtTick(tickLower/tickUpper)` — no hand-rolled rounding.
-- **`RedeemData.shares` → `RedeemData.liquidity`** (it always carried L, not a share count).
 - **The compound leg makes no external transfer to any account**: 100% of fees are taken
   to the vault and reinvested; the only token movements are settlements with the PoolManager.
+- **Fee retention:** V4 folds a position's *full* `feesAccrued` into `callerDelta` on **any**
+  `modifyLiquidity` — unhandled, the first party to touch the position after fees accrue would
+  sweep 100% of the uncompounded fees. `deposit`/`redeem` therefore split
+  `callerDelta − feesAccrued`: the caller gets only their principal, and the fees are retained
+  at `address(this)` for all holders, folding forward into the next compound. No path ever pays
+  fees out — the compound leg converts them to position liquidity.
+- **Fee-accounting events for off-chain adapters:** `Compound(vltFees, usdcFees,
+  liquidityAdded)` reports each full fresh harvest, and `FeesRetained(vltFees, usdcFees)` fires
+  whenever `deposit`/`redeem` harvest-and-retain pool fees. Log-based fee accounting (e.g. a
+  DefiLlama fees adapter) is complete from events alone: realized fees = Σ `Compound.fee` +
+  Σ `FeesRetained.fee`, all of it supply-side; TVL needs no events
+  (`previewRedeem(totalSupply())` + vault balances). See `AUDIT.MD` §7a/§7d.
 - **Documented design choices in-code:** compound dust **folds forward** into the next
   compound (it isn't counted in shares, so it can only ever raise future NAV); the `uint128`
   downcast in `redeem` is provably bounded by the position's own `uint128` liquidity; USDC's
   6 decimals + blacklist behavior (a blacklisted holder's redeem reverts on the USDC leg —
   their problem, not a solvency issue) and the deliberate absence of any approval flow.
-
-Plus **fee-accounting events for off-chain adapters** (post-audit, July 2026): `Compound`
-emits the FULL freshly-harvested `fee0`/`fee1`, and a
-`FeesRetained(fee0, fee1)` fires whenever `deposit`/`redeem` harvest-and-retain pool fees.
-Log-based fee accounting (e.g. a DefiLlama fees adapter) is now complete from events alone:
-realized fees = Σ `Compound.fee` + Σ `FeesRetained.fee`, all of it supply-side; TVL
-needs no events (`previewRedeem(totalSupply())` + vault balances). See `AUDIT.MD` §7a.
-
-Plus **BUG-1 (found by Slither, confirmed by test, fixed):** V4 folds the position's *full*
-`feesAccrued` into `callerDelta` on **any** `modifyLiquidity`. The scaffold's `_onRedeem`
-handed the whole delta to the redeemer and `_addLiquidity` netted it into a depositor's cost —
-so the first party to touch the position after fees accrued swept **100%** of the uncompounded
-fees, defeating the compound model. Fixed by splitting `callerDelta − feesAccrued`:
-the caller gets only their principal, and the fees are retained at `address(this)` (a deposit
-harvests them up front), folding forward to all holders. No path ever pays fees out — the
-auto-compound leg converts them to position liquidity.
 
 ## Core / periphery split (ZapHelper)
 
@@ -281,7 +274,8 @@ reference. The `ZapHelper` is **periphery** and sits in front of it:
    **immutable** whitelisted router (Uniswap's **Universal Router** on mainnet), bounded by
    `minVltOut`. This is the **buy-pressure leg** (drains external VLT supply, lifts price).
 2. It deposits the bought VLT + remaining USDC into the vault via `vault.deposit(vlt, usdc,
-   minShares, deadline)` and forwards the minted shares + any dust to the caller. The `deadline`
+   minShares, deadline, recipient)` — the vault mints shares straight to the end wallet — and
+   sweeps any refund dust back to the caller. The `deadline`
    (checked by the helper before the swap leg, and again by the vault) stops a stale mempool
    transaction from executing an old route under moved market terms.
 
@@ -380,11 +374,9 @@ justifications, so Solhint/Slither stay clean.
 
 ## Remaining before mainnet
 
-Mapping to the completion plan's Definition of Done — what this workspace does **not** yet do:
+What this workspace does **not** yet do:
 
-1. ~~**Slither**~~ — done: wired (`npm run slither`), all findings triaged, reports 0. Re-run
-   after any contract change.
-2. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
+1. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
    the V4 fee-settlement path (BUG-1) and that the `feesAccrued`/principal split is complete
    across every callback; the **deposit-triggered auto-compound** (see AUDIT.MD §7d: the
    internal `_compound()` leg with no external entrypoint, the shared-fate coupling — a
@@ -393,8 +385,9 @@ Mapping to the completion plan's Definition of Done — what this workspace does
    inertness); and the **ZapHelper / external-sourcing
    path** (deposit's dependency on VLT's external market, the
    arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
-   NOTE: `AUDIT.MD`'s line citations were pinned against `6d76648` and predate this change.
-3. **Mainnet pool init + deploy + verify** — requires a funded key + archive RPC; the scripts
+   NOTE: `AUDIT.MD` §§1–7 line citations were pinned against `6d76648`; §7d covers the
+   keeperless redesign. Re-run Slither (`npm run slither`) + the suite after any change.
+2. **Mainnet pool init + deploy + verify** — requires a funded key + archive RPC; the scripts
    above are ready. Publish the vault address into the pitch's Parameters table afterward.
 
 ## Notes / caveats
@@ -403,5 +396,5 @@ Mapping to the completion plan's Definition of Done — what this workspace does
   ~40 ops), not Foundry's thousands-of-runs invariant engine. It asserts the same four
   invariants but at smaller scale. A complementary Foundry `invariant_*` suite is recommended
   pre-audit if exhaustive fuzzing is desired.
-- **Reviewed scaffold, not audited code** — do not deploy real funds before the audit.
+- **Not yet independently audited** — do not deploy real funds before the Shieldify audit.
 ```
