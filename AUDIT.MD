@@ -12,7 +12,7 @@
 This audit covers source-code analysis, static analysis (Slither, re-run fresh for this
 report), and review of the project's dynamic test suite (executed for this report). It is not
 a substitute for the planned independent Shieldify review, formal verification, or an
-economic simulation of keeper behavior. See **Disclaimer** at the end.
+economic simulation of deposit-flow compounding cadence. See **Disclaimer** at the end.
 
 ---
 
@@ -45,7 +45,8 @@ an upgradeable, blacklistable third-party contract.
 `VltUsdcVault` is a single-position, full-range Uniswap V4 VLT/USDC LP vault whose ERC-20
 shares are denominated in pool **liquidity (L)** rather than dollars. It is **fully
 ownerless**: no admin, no pause, no upgrade path, no privileged parameter, no sweep. The
-three entrypoints (`deposit`, `redeem`, `compound`) are permissionless and `nonReentrant`;
+two entrypoints (`deposit`, `redeem`) are permissionless and `nonReentrant` — compounding
+has no entrypoint of its own; it runs inside deposits (§7d);
 the only external dependency in the critical path is the canonical V4 `PoolManager`, with
 hooks explicitly disallowed at construction (`VltUsdcVault.sol:244`). `ZapHelper` is a
 stateless, ownerless periphery contract that converts USDC-only deposits into the balanced
@@ -118,8 +119,8 @@ Out of scope: `@uniswap/v4-core`, `@uniswap/v4-periphery`, `@openzeppelin/contra
 
 | Actor | Capabilities | Notes |
 |---|---|---|
-| Any user | `deposit`, `redeem`, `compound`, ERC-20 share ops | No privileged role exists anywhere |
-| Keeper / finder | `compound()` for a 1% in-kind cut of freshly harvested pool fees | Permissionless, competitive |
+| Any user | `deposit`, `redeem`, ERC-20 share ops | No privileged role exists anywhere |
+| Triggering depositor | Any deposit at ≥$100 claimable runs the internal compound leg first | No reward — 100% of the harvest reinvests (§7d) |
 | ZapHelper (or any zapper) | Ordinary caller of `deposit` | Vault has no knowledge of it |
 | Uniswap V4 PoolManager | Sole external dependency; calls back `unlockCallback` | Callback gated to `msg.sender == poolManager` (`VltUsdcVault.sol:583-584`) |
 | Deployer | Constructor parameters only | Zero post-deploy privileges |
@@ -134,11 +135,12 @@ key could touch because there is no admin key.
 1. **Solvency by construction** — shares are a pro-rata claim on position liquidity;
    `redeem` removes exactly `floor(L·shares/supply)` and returns both tokens in-kind
    (`VltUsdcVault.sol:470`). The vault never owes more L than the position holds.
-2. **Share supply changes only in `deposit`/`redeem`** — `compound()` mints no shares, so
+2. **Share supply changes only in `deposit`/`redeem`** — the compound leg mints no shares, so
    L/share is monotonically non-decreasing across compounds (`VltUsdcVault.sol:765-766`).
 3. **Uncompounded pool fees always accrue to all holders** — every `modifyLiquidity` path
    splits `feesAccrued` out of `callerDelta` and retains it at the vault
-   (`VltUsdcVault.sol:620-646, 692-704`); only `compound()` pays any fee out (the 1%). See
+   (`VltUsdcVault.sol:620-646, 692-704`); no path pays fees out — the compound leg converts
+   them to position liquidity (§7d). See
    I-10 for the one bounded exception this creates for a joining depositor.
 4. **Every unlock nets its deltas to zero** — otherwise the PoolManager reverts
    `CurrencyNotSettled`; all passing flow tests prove this transitively.
@@ -154,31 +156,31 @@ in-code (`VltUsdcVault.sol:443-447`).
 
 ## 5. Findings — Low
 
-### L-01 — `compound()` values and rebalances at manipulable spot price; "never loses" is a bounded-loss claim, not an absolute one
+### L-01 — The compound leg values and rebalances at manipulable spot price; "never loses" is a bounded-loss claim, not an absolute one
 
 **Location:** `VltUsdcVault.sol:298-323` (`compoundClaimable`), `846-893` (`_rebalance`),
 `93-111` (limit + cap constants)
 
-`compound()` gates on a USDC valuation of claimable assets taken from the pool's current
+The compound path gates on a USDC valuation of claimable assets taken from the pool's current
 `sqrtPriceX96`, and `_rebalance` sizes and executes its internal swap against that same
 spot price, bounded to a ≤5% *further* move by `sqrtPriceLimitX96`. The 5% band bounds the
 price impact **of the vault's own swap**, relative to whatever the pool price already is —
-it does not bound a *prior* manipulation. An attacker can push the pool price, then call
-`compound()` (earning the finder fee themselves), causing the vault to swap ~half its
+it does not bound a *prior* manipulation. An attacker can push the pool price, then trigger
+the compound leg (originally by calling `compound()`; today via a deposit), causing the vault to swap ~half its
 claimable imbalance at the skewed price and add liquidity at that skewed ratio; the
 attacker's restoring swap then extracts part of that value.
 
 **Why this is Low, not Medium:** the exploit is structurally unprofitable in this design.
 (1) The at-risk notional is only the reinvestable balance (fees since the last compound
-plus retained dust — typically small, floored at $1). (2) Manipulating a full-range 1% pool
+plus retained dust — typically small; the trigger floor is now $100, §7d). (2) Manipulating a full-range 1%-fee pool
 requires a large swap whose 1% fee accrues predominantly **to the vault itself** (it is the
 dominant LP), so the attacker funds the holders they are attacking, twice (push and
 restore). (3) Liquidity added at a bad price is bounded dust relative to the manipulation
 cost. The in-code claim "a manipulated price simply defers, never loses"
 (`VltUsdcVault.sol:96`) is slightly stronger than what holds: an unfilled remainder defers,
-but the filled portion executes at the prevailing (possibly skewed) price. The test
-`compound keeps NAV/share monotonic even when the price is pushed before compound`
-exercises exactly this and passes because the fee income exceeds the skew loss.
+but the filled portion executes at the prevailing (possibly skewed) price. The suite's
+NAV/share-monotonic-under-price-push test exercises exactly this and passes because the
+fee income exceeds the skew loss.
 
 **Recommendation:** No code change required given the economics. If extra belt-and-braces
 is wanted before mainnet, cap `amountIn` in `_rebalance` to a small multiple of this
@@ -251,7 +253,7 @@ reverts before the swap leg runs."
 
 ## 6. Findings — Informational
 
-### I-01 — `compound()` reverts instead of no-opping if ≥ $1 is donated to the vault before the first deposit
+### I-01 — (superseded — §7d M-01) Pre-first-deposit donation makes the compound path revert
 
 `compoundClaimable()` counts vault-held balances (`VltUsdcVault.sol:316-317`), so a ≥$1
 donation made **before any deposit exists** passes the gate, and `_onCompound`'s
@@ -305,15 +307,14 @@ redeem. Neither has a code remediation in an ownerless design; they are inherent
 with USDC and should be listed in user-facing risk docs. The VLT leg carries no equivalent
 risk (immutable token, §1).
 
-### I-07 — Finder-fee base excludes retained balances: keeper incentive can lag the gate
+### I-07 — (obsolete — §7d removed the finder fee) Finder-fee base excluded retained balances
 
-Conscious design (documented at `VltUsdcVault.sol:727-730` and in the README): the 1%
-bounty is computed only on **freshly harvested pool fees**, while retained
-deposit/redeem-harvested fees and dust reinvest with no bounty. Consequence: the $1 gate
-can be satisfied almost entirely by retained balances while the bounty is near zero, so no
-rational keeper calls `compound()` and the retained value sits unreinvested until fresh
-pool fees accrue. Pure opportunity cost to holders, no loss; flagged so the choice is
-re-confirmed at the Shieldify review as the README requests.
+Conscious design of the original keeper model (then documented in-code and in the README):
+the 1% bounty was computed only on **freshly harvested pool fees**, while retained
+deposit/redeem-harvested fees and dust reinvested with no bounty. Consequence: the $1 gate
+could be satisfied almost entirely by retained balances while the bounty was near zero, so
+no rational keeper would call the then-public `compound()` and the retained value sat
+unreinvested until fresh pool fees accrued. Pure opportunity cost to holders, no loss.
 
 **Obsolete (July 14, 2026 — §7d):** the finder fee was removed entirely — 100% of every
 harvest reinvests for holders and no keeper path exists, so this incentive-lag concern no
@@ -352,12 +353,10 @@ direction (a leaver forfeits pending fees, `:692-704`), so the only extractable 
 deposit-then-hold-through-a-compound — classic JIT yield capture, not an atomic round-trip.
 
 **Why informational, not a vulnerability:** the transferable amount is bounded by the
-*uncompounded* fee/dust balance at deposit time — small under the permissionless, $1-gated,
-1%-bounty compound cadence — there is no atomic profit and no solvency or theft vector, and
+*uncompounded* fee/dust balance at deposit time — there is no atomic profit and no solvency
+or theft vector, and
 capturing a meaningful fraction requires depositing capital comparable to the entire existing
-position for a dust-sized gain. Existing holders can fully neutralize it by calling the
-permissionless `compound()` before a large deposit lands (crystallizing pending value into L
-first). Invariant #3 and the §7 donation analysis were tightened to cross-reference this.
+position for a dust-sized gain. Invariant #3 and the §7 donation analysis were tightened to cross-reference this.
 
 **Recommendation: accept and document** as bounded JIT-yield capture — the current, and
 correct, choice. The theoretical alternative, crystallizing pending+retained fees into L at the
@@ -379,6 +378,15 @@ that a keeper `compound()` immediately before a large deposit erases even the bo
 **Do not** instead add vault token balances to the share price — that reopens the
 donation-inflation vector this design exists to prevent. Flagged for the Shieldify review so
 the trade-off is explicitly re-confirmed.
+
+**Superseded in part (July 14, 2026 — §7d):** the redesign deliberately adopted a
+threshold-gated form of the "not recommended" alternative above: a deposit at ≥$100
+claimable crystallizes pending value into L *before* its shares are priced. Of the three
+costs cited, (1) the gas tax now falls only on threshold-crossing deposits, (2) keeper
+cannibalization is moot (no keeper or bounty exists), and (3) the swap-free-deposit
+invariant was consciously traded away — the L-01 cap and ≤5% price bound guard the leg's
+swap wherever it runs. I-10's residual window is therefore only the sub-$100 claimable
+balance.
 
 ---
 
@@ -405,8 +413,8 @@ pending fees — analyzed as informational finding I-10.)
 full accrued fees into `callerDelta` on *any* `modifyLiquidity`. `_onDeposit` harvests fees
 to the vault before the depositor's add (`VltUsdcVault.sol:620-646`); `_onRedeem` pays the
 redeemer `callerDelta − feesAccrued` and takes the fees to the vault
-(`VltUsdcVault.sol:692-704`); `_onCompound` is the only fee-payout path (1% of the fresh
-harvest). `test/vault.fees.test.js` covers all three.
+(`VltUsdcVault.sol:692-704`); `_onCompound` pays nothing out — 100% of the harvest
+reinvests (§7d). `test/vault.fees.test.js` covers all three.
 
 **Delta settlement — nets to zero on every path.** Adds settle negative deltas
 (`sync → transfer → settle`, `VltUsdcVault.sol:921-928`), removes/harvests `take` positive
@@ -414,11 +422,11 @@ deltas in full, and the swap settles only the input actually consumed under a pa
 (`VltUsdcVault.sol:895-919`). Any residual would revert the whole unlock
 (`CurrencyNotSettled`), which the passing flow tests exclude.
 
-**Reentrancy — guarded and structurally limited.** All three entrypoints are
+**Reentrancy — guarded and structurally limited.** Both entrypoints are
 `nonReentrant`; the unlock callback accepts only the PoolManager (`VltUsdcVault.sol:583-584`);
-the pool tokens have no transfer hooks (§1); the finder payout is last, after all pool
-effects (`VltUsdcVault.sol:776-779`). The suite's `ReentrantToken` probe asserts reentry
-reverts with `ReentrancyGuardReentrantCall`.
+the pool tokens have no transfer hooks (§1); the compound leg makes no external transfer to
+any account (§7d). The suite's `ReentrantToken` probes (reentrant `redeem` and reentrant
+`deposit` from a token hook) assert reentry reverts with `ReentrancyGuardReentrantCall`.
 
 **Redeem sandwiching — not value-extractable.** Redemption is strictly in-kind and
 pro-rata; a manipulated price only shifts the token *split*, and by AM-GM the bundle at a
@@ -471,7 +479,9 @@ asserting `FeesRetained` matches computed gross fees on both paths and
 change. Frontend ABI (`src/js/vault-abi.js`) updated to match.
 
 *(Naming note: §7c later renamed these event fields to token-named `vltFees`/`usdcFees` /
-`vltFinder`/`usdcFinder` — same layout and topic0 hashes, so the identity above is unchanged.)*
+`vltFinder`/`usdcFinder` — same layout and topic0 hashes at that time. §7d then removed the
+finder fields entirely — `Compound(vltFees, usdcFees, liquidityAdded)`, new topic0 — and the
+identity simplified to supply-side revenue == realized fees.)*
 
 ---
 
@@ -549,6 +559,7 @@ deltas under BOTH orderings.
 Consumers updated in the same pass: Dune queries/README, DefiLlama fees + TVL adapters and
 fork harness, frontend ABI + test client. Suite at 54 passing (plus the 2 mainnet-fork
 tests), Solhint clean, Slither 0 findings (96 detectors, re-run July 10 post-§7b/§7c).
+*(§7d later reshaped `Compound` and removed the compound entrypoint + finder fields.)*
 
 ---
 
@@ -651,7 +662,7 @@ detectors); Solhint clean.**
 | No upgradeability, `delegatecall`, or `selfdestruct` | Pass |
 | No pause (exit always open) | Pass |
 | Reentrancy guards on all entrypoints; callback caller-gated | Pass |
-| Checks-effects-interactions (burn-before-unlock; finder paid last) | Pass |
+| Checks-effects-interactions (burn-before-unlock; compound leg makes no external transfers) | Pass |
 | First-depositor inflation mitigated (dead shares + min first ΔL) | Pass |
 | Donation-inflation mitigated (ΔL-based shares, retain snapshot) | Pass |
 | V4 `feesAccrued`/principal split complete on every `modifyLiquidity` path | Pass |
@@ -663,6 +674,7 @@ detectors); Solhint clean.**
 | Deadline parameters on time-sensitive entrypoints | Pass (fixed — L-03) |
 | Refund routing in periphery `zap()` | Pass (fixed — L-02) |
 | Rebalance notional capped independently of retained balance | Pass (fixed — L-01) |
+| Pre-seed donation cannot brick the first deposit | Pass (fixed — §7d M-01) |
 | Exact dependency pinning in manifest | Fail (Info — I-09) |
 | Independent third-party audit | Pending (Shieldify) |
 
@@ -677,7 +689,9 @@ routing/MEV surface out of the solvency-critical core. The historically dangerou
 this pattern — first-depositor inflation, donation inflation, and V4's fee-folding
 semantics — are all handled correctly and covered by targeted tests.
 
-**No Critical, High, or Medium issues were found.** The three Low findings — a
+**No Critical, High, or Medium issues were found in the July 8 review.** (The July 14
+keeperless redesign later introduced **and fixed pre-deployment** one Medium — M-01, §7d.)
+The three Low findings — a
 fresh-fee-scaled cap on the compound rebalance notional (plus an honest restatement of its
 price-bound guarantee), refund routing in `zap()`, and deadlines on `deposit`/`zapDeposit` —
 **have all been fixed and regression-tested** (see the Resolution notes in §5; Slither 0,
@@ -686,7 +700,8 @@ choices that should simply be re-confirmed during the independent review.
 
 Recommended before mainnet, in order: (1) ~~apply/accept L-01–L-03 explicitly~~ done; (2) complete
 the planned **Shieldify audit** with the README's flagged scope (V4 settlement paths, the
-fee split, the finder-fee base, and the ZapHelper external-sourcing pattern); (3) re-run
+fee split, the §7d keeperless auto-compound — shared-fate coupling and compound-leg
+revert-freedom — and the ZapHelper external-sourcing pattern); (3) re-run
 Slither + the full suite (and ideally a Foundry invariant pass) on the final commit; and
 (4) publish the audited commit hash and deployed addresses so users can verify source
 against bytecode.
