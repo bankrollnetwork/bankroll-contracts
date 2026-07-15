@@ -7,7 +7,7 @@
 | Reviewer | Codex |
 | Original review date | July 10, 2026 |
 | Current-source update | July 14, 2026 |
-| Context | Second-opinion review updated for the current keeperless, deposit-triggered auto-compound contract. All source citations below use current GitHub-style line anchors. |
+| Context | Second-opinion review updated for the current keeperless, deposit-triggered auto-compound contract. All source citations below use current GitHub-style line anchors (re-anchored to `main` @ `435d940` after the same-day REBALANCE_CAP_MULT removal). |
 
 ## Executive Summary
 
@@ -37,11 +37,11 @@ With the project economics made explicit, I consider this a clean audit: no Crit
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:384-398](contracts/VltUsdcVault.sol#L384-L398) - `deposit()` checks `compoundClaimable()` and runs `_compound()` before measuring this depositor's liquidity when the threshold is met.
-- [contracts/VltUsdcVault.sol:400-443](contracts/VltUsdcVault.sol#L400-L443) - `deposit()` snapshots retained balances, pulls the depositor's tokens, adds only the depositor contribution, and mints shares from actual added liquidity.
-- [contracts/VltUsdcVault.sol:615-667](contracts/VltUsdcVault.sol#L615-L667) - `_onDeposit()` harvests pending V4 fees into retained vault balances, then adds only the depositor contribution.
-- [contracts/VltUsdcVault.sol:460-489](contracts/VltUsdcVault.sol#L460-L489) - `redeem()` removes pro-rata position liquidity only.
-- [contracts/VltUsdcVault.sol:673-711](contracts/VltUsdcVault.sol#L673-L711) - `_onRedeem()` subtracts accrued fees from the redeemer payout and retains them for remaining holders.
+- [contracts/VltUsdcVault.sol:377-391](contracts/VltUsdcVault.sol#L377-L391) - `deposit()` checks `compoundClaimable()` and runs `_compound()` before measuring this depositor's liquidity when the threshold is met.
+- [contracts/VltUsdcVault.sol:393-436](contracts/VltUsdcVault.sol#L393-L436) - `deposit()` snapshots retained balances, pulls the depositor's tokens, adds only the depositor contribution, and mints shares from actual added liquidity.
+- [contracts/VltUsdcVault.sol:608-660](contracts/VltUsdcVault.sol#L608-L660) - `_onDeposit()` harvests pending V4 fees into retained vault balances, then adds only the depositor contribution.
+- [contracts/VltUsdcVault.sol:453-482](contracts/VltUsdcVault.sol#L453-L482) - `redeem()` removes pro-rata position liquidity only.
+- [contracts/VltUsdcVault.sol:666-704](contracts/VltUsdcVault.sol#L666-L704) - `_onRedeem()` subtracts accrued fees from the redeemer payout and retains them for remaining holders.
 
 ### Description
 
@@ -67,12 +67,12 @@ Keep the design if this is the intended policy, but document it directly:
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:281-316](contracts/VltUsdcVault.sol#L281-L316) - `compoundClaimable()` values retained balances plus pending fees at live pool spot.
-- [contracts/VltUsdcVault.sol:384-398](contracts/VltUsdcVault.sol#L384-L398) - `deposit()` triggers `_compound()` once claimable value reaches `AUTO_COMPOUND_MIN_USDC` and the position exists.
-- [contracts/VltUsdcVault.sol:496-516](contracts/VltUsdcVault.sol#L496-L516) - `_compound()` is internal only and runs through the V4 unlock path.
-- [contracts/VltUsdcVault.sol:717-758](contracts/VltUsdcVault.sol#L717-L758) - `_onCompound()` harvests fees, rebalances, then reinvests the full vault balance with no shares minted and no fee paid out.
-- [contracts/VltUsdcVault.sol:769-807](contracts/VltUsdcVault.sol#L769-L807) - `_addLiquidity()` reads current `slot0` and mints liquidity from desired token amounts.
-- [contracts/VltUsdcVault.sol:816-858](contracts/VltUsdcVault.sol#L816-L858) - `_rebalance()` caps only the internal swap input to a multiple of freshly harvested fees.
+- [contracts/VltUsdcVault.sol:274-309](contracts/VltUsdcVault.sol#L274-L309) - `compoundClaimable()` values retained balances plus pending fees at live pool spot.
+- [contracts/VltUsdcVault.sol:377-391](contracts/VltUsdcVault.sol#L377-L391) - `deposit()` triggers `_compound()` once claimable value reaches `AUTO_COMPOUND_MIN_USDC` and the position exists.
+- [contracts/VltUsdcVault.sol:489-509](contracts/VltUsdcVault.sol#L489-L509) - `_compound()` is internal only and runs through the V4 unlock path.
+- [contracts/VltUsdcVault.sol:710-750](contracts/VltUsdcVault.sol#L710-L750) - `_onCompound()` harvests fees, rebalances, then reinvests the full vault balance with no shares minted and no fee paid out.
+- [contracts/VltUsdcVault.sol:761-799](contracts/VltUsdcVault.sol#L761-L799) - `_addLiquidity()` reads current `slot0` and mints liquidity from desired token amounts.
+- [contracts/VltUsdcVault.sol:808-843](contracts/VltUsdcVault.sol#L808-L843) - `_rebalance()` swaps ~half the value-imbalance bounded by the ≤5% price limit *(post-review change — the fee-scaled cap it reviewed was removed; see the project note below)*.
 
 ### Description
 
@@ -109,11 +109,11 @@ No mandatory code change if the current economic model is accepted. Recommended 
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:70-72](contracts/VltUsdcVault.sol#L70-L72) - ownerless/immutable design statement.
-- [contracts/VltUsdcVault.sol:229-259](contracts/VltUsdcVault.sol#L229-L259) - constructor fixes pool identity, requires no hooks, and labels USDC/VLT.
-- [contracts/VltUsdcVault.sol:355-443](contracts/VltUsdcVault.sol#L355-L443) - `deposit()` is permissionless and includes the internal compound trigger.
-- [contracts/VltUsdcVault.sol:460-489](contracts/VltUsdcVault.sol#L460-L489) - `redeem()` remains permissionless and in-kind.
-- [contracts/VltUsdcVault.sol:496-516](contracts/VltUsdcVault.sol#L496-L516) - compounding is internal only; there is no admin or keeper function.
+- [contracts/VltUsdcVault.sol:71-73](contracts/VltUsdcVault.sol#L71-L73) - ownerless/immutable design statement.
+- [contracts/VltUsdcVault.sol:222-252](contracts/VltUsdcVault.sol#L222-L252) - constructor fixes pool identity, requires no hooks, and labels USDC/VLT.
+- [contracts/VltUsdcVault.sol:348-436](contracts/VltUsdcVault.sol#L348-L436) - `deposit()` is permissionless and includes the internal compound trigger.
+- [contracts/VltUsdcVault.sol:453-482](contracts/VltUsdcVault.sol#L453-L482) - `redeem()` remains permissionless and in-kind.
+- [contracts/VltUsdcVault.sol:489-509](contracts/VltUsdcVault.sol#L489-L509) - compounding is internal only; there is no admin or keeper function.
 
 ### Description
 
