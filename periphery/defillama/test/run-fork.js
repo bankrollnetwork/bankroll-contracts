@@ -22,6 +22,8 @@ const VAULT_ABI = [
   "function usdc() view returns (address)",
   "function positionLiquidity() view returns (uint128)",
   "function compoundClaimable() view returns (uint256 vltAmount, uint256 usdcAmount, uint256 valueUsdc, uint256 feesValueUsdc)",
+  "function totalFeesVlt() view returns (uint256)",
+  "function totalFeesUsdc() view returns (uint256)",
 ];
 
 const fmt = (raw, dec) => Number(ethers.formatUnits(raw, dec)).toLocaleString("en-US", { maximumFractionDigits: 4 });
@@ -84,6 +86,22 @@ async function main() {
     throw new Error("supply-side != fees — adapter assumption broken (some cut appeared?)");
   }
   if (compounds.length) console.log("  ✓ supply-side == fees holds (100% reinvests, no finder cut)");
+
+  // Cross-check the on-chain lifetime counters against the event sums over this range. They are
+  // equal whenever the range covers the vault's whole life (a fresh fork deploy). A shortfall on
+  // the event side only means FROM_BLOCK starts after vault inception — note it, don't fail.
+  const totVlt = await vault.totalFeesVlt();
+  const totUsdc = await vault.totalFeesUsdc();
+  const all = [...compounds, ...retained];
+  const sumVlt = all.reduce((s, l) => s + l.vltFees, 0n);
+  const sumUsdc = all.reduce((s, l) => s + l.usdcFees, 0n);
+  if (totVlt === sumVlt && totUsdc === sumUsdc) {
+    console.log("  ✓ totalFeesVlt/Usdc == Σ event fees (lifetime counters match the logs exactly)");
+  } else if (totVlt >= sumVlt && totUsdc >= sumUsdc) {
+    console.log(`  (note) lifetime counters (${fmt(totVlt, 18)} VLT / ${fmt(totUsdc, 6)} USDC) exceed this range's event sums — FROM_BLOCK likely starts after vault inception`);
+  } else {
+    throw new Error("lifetime fee counters BELOW the range's event sums — accounting drift, investigate");
+  }
 
   const show = (label, bals) => {
     const v = bals.items[vlt] ?? 0n;

@@ -189,6 +189,15 @@ async function main() {
     `\n✓ ${compounded}/${days} days compounded.  L/share=${ethers.formatUnits(perShare, 18)}` +
       `  ·  lifetime ${pct(apr.lifetimeBps)}  ·  7d ${pct(apr.d7Bps)}  ·  30d ${pct(apr.d30Bps)}`
   );
+  // Lifetime realized fees (the on-chain counters, incremented at every collection point —
+  // always equal to Σ Compound + Σ FeesRetained event fees).
+  const totVlt = await vault.totalFeesVlt();
+  const totUsdc = await vault.totalFeesUsdc();
+  console.log(
+    `  lifetime fees: ${Number(ethers.formatUnits(totVlt, 18)).toLocaleString("en-US", { maximumFractionDigits: 4 })} VLT` +
+      ` + ${Number(ethers.formatUnits(totUsdc, 6)).toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC` +
+      `  (totalFeesVlt / totalFeesUsdc)`
+  );
   if (compounded === 0) {
     console.log("(note) nothing compounded — raise SIM_USDC_PER_SWAP, or confirm the seed succeeded.");
   }
