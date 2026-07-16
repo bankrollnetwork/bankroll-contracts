@@ -148,6 +148,16 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     uint32 public lastSnapshotDay; // block.timestamp / 1 days of the newest write (0 = none yet)
     uint8 public feeHistoryHead;   // index of the newest write; packs with lastSnapshotDay
 
+    /// @notice Lifetime pool fees realized by the vault, token-named (VLT 18d / USDC 6d).
+    /// Incremented by _recordFees() at EVERY point fees are collected from the position — the
+    /// compound leg's fresh harvest AND deposit()/redeem()'s harvest-and-retain pokes — so the
+    /// counters always equal the events identity: Σ `Compound` fees + Σ `FeesRetained` fees.
+    /// (Compound-only recording would under-count: every redeem and every below-threshold deposit
+    /// realizes fees too.) Informational, like the APR ring: read by clients, never used in
+    /// vault accounting.
+    uint256 public totalFeesVlt;
+    uint256 public totalFeesUsdc;
+
     /*//////////////////////////////////////////////////////////////
                                   ACTIONS
     //////////////////////////////////////////////////////////////*/
@@ -339,6 +349,19 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         }
         // currency0 = VLT, currency1 = USDC. USDC(VLT) = vlt · price = vlt · sqrtP^2 / Q96^2.
         return amt1 + FullMath.mulDiv(FullMath.mulDiv(amt0, sp, Q96), sp, Q96);
+    }
+
+    /// @dev Fold a freshly collected (currency0, currency1) fee pair into the lifetime totals and
+    /// return it token-named — a drop-in for `_toVltUsdc` at each event-emitting collection site
+    /// (_onDeposit / _onRedeem / _onCompound), so the counters can never drift from the events.
+    function _recordFees(uint256 fee0, uint256 fee1)
+        internal
+        returns (uint256 vltFees, uint256 usdcFees)
+    {
+        (vltFees, usdcFees) = _toVltUsdc(fee0, fee1);
+
+        if (vltFees > 0) totalFeesVlt += vltFees;
+        if (usdcFees > 0) totalFeesUsdc += usdcFees;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -602,9 +625,10 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
       suite asserts zero residual deltas on every callback.
     //////////////////////////////////////////////////////////////*/
 
-    // Reentrancy-events: the only external calls are into the trusted PoolManager within our own
-    // unlock, and the whole entrypoint is nonReentrant — the FeesRetained emit is not a vector.
-    // slither-disable-next-line reentrancy-events
+    // Reentrancy: the only external calls are into the trusted PoolManager within our own
+    // unlock, and the whole entrypoint is nonReentrant — the FeesRetained emit is not a vector, and the
+    // only post-call state writes are the informational lifetime fee counters (_recordFees).
+    // slither-disable-next-line reentrancy-events,reentrancy-benign
     function _onDeposit(DepositData memory d) internal returns (bytes memory) {
         uint256 retain0 = d.retain0;
         uint256 retain1 = d.retain1;
@@ -635,7 +659,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
                 retain1 += uint256(uint128(f1));
             }
             if (f0 > 0 || f1 > 0) {
-                (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(
+                (uint256 vltFees, uint256 usdcFees) = _recordFees(
                     f0 > 0 ? uint256(uint128(f0)) : 0,
                     f1 > 0 ? uint256(uint128(f1)) : 0
                 );
@@ -660,9 +684,10 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         return abi.encode(liquidityAdded, paid0, paid1);
     }
 
-    // Reentrancy-events: the only external calls are into the trusted PoolManager within our own
-    // unlock, and the whole entrypoint is nonReentrant — the FeesRetained emit is not a vector.
-    // slither-disable-next-line reentrancy-events
+    // Reentrancy: the only external calls are into the trusted PoolManager within our own
+    // unlock, and the whole entrypoint is nonReentrant — the FeesRetained emit is not a vector, and the
+    // only post-call state writes are the informational lifetime fee counters (_recordFees).
+    // slither-disable-next-line reentrancy-events,reentrancy-benign
     function _onRedeem(RedeemData memory d) internal returns (bytes memory) {
         (BalanceDelta callerDelta, BalanceDelta feesAccrued) = poolManager.modifyLiquidity(
             poolKey,
@@ -694,7 +719,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         if (f0 > 0) poolManager.take(currency0, address(this), uint256(uint128(f0)));
         if (f1 > 0) poolManager.take(currency1, address(this), uint256(uint128(f1)));
         if (f0 > 0 || f1 > 0) {
-            (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(
+            (uint256 vltFees, uint256 usdcFees) = _recordFees(
                 f0 > 0 ? uint256(uint128(f0)) : 0,
                 f1 > 0 ? uint256(uint128(f1)) : 0
             );
@@ -704,9 +729,10 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         return abi.encode(amount0, amount1);
     }
 
-    // Reentrancy-events: the only external calls are into the trusted PoolManager within our own
-    // unlock, and the whole entrypoint is nonReentrant — the trailing event is not a vector.
-    // slither-disable-next-line reentrancy-events
+    // Reentrancy: the only external calls are into the trusted PoolManager within our own
+    // unlock, and the whole entrypoint is nonReentrant — the trailing event is not a vector, and the
+    // only post-call state writes are the informational lifetime fee counters (_recordFees).
+    // slither-disable-next-line reentrancy-events,reentrancy-benign
     function _onCompound() internal returns (bytes memory) {
         // 1. Collect accrued fees: modifyLiquidity with liquidityDelta == 0 returns the
         //    fees owed as `feesAccrued` (== callerDelta when delta is zero), a positive delta.
@@ -744,7 +770,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         (uint128 liquidityAdded,,) = _addLiquidity(_selfBalance(currency0), _selfBalance(currency1));
 
         {
-            (uint256 vltFees, uint256 usdcFees) = _toVltUsdc(fee0, fee1);
+            (uint256 vltFees, uint256 usdcFees) = _recordFees(fee0, fee1);
             emit Compound(vltFees, usdcFees, liquidityAdded);
         }
         return abi.encode(liquidityAdded);

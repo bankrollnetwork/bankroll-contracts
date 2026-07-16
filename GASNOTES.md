@@ -16,11 +16,11 @@ Measured with `test/gas.autocompound.test.js` (local PoolManager, solc 0.8.26 vi
 
 | Scenario | pre-branch baseline | this design | Δ |
 |---|---|---|---|
-| Quiet direct deposit (below trigger) | 221,489 | 237,908 | **+16.4k** standing view-check tax |
-| Direct deposit, ≥$100 claimable (compound fires) | 315,428 | 483,173 | +165k on the triggering deposit |
-| Deposit right after a trigger | 221,538 | 237,960 | +16.4k (back to quiet cost) |
-| Quiet zapDeposit | 382,816 | 395,934 | +13.1k |
-| zapDeposit, ≥$100 claimable (compound fires) | 426,099 | 574,411 | +148k |
+| Quiet direct deposit (below trigger) | 221,489 | 237,945 | **+16.4k** standing view-check tax |
+| Direct deposit, ≥$100 claimable (compound fires) | 315,428 | 527,633 | +212k on the triggering deposit (incl. two cold totalFees SSTOREs; ~+10k warm) |
+| Deposit right after a trigger | 221,538 | 237,997 | +16.4k (back to quiet cost) |
+| Quiet zapDeposit | 382,816 | 395,964 | +13.1k |
+| zapDeposit, ≥$100 claimable (compound fires) | 426,099 | 618,877 | +193k |
 
 (The removed keeper path used to cost 418k for `compound()` + 222k for the deposit = 640k across
 two txs; dropping the finder payout then shaved another ~15k off the triggering deposit.)

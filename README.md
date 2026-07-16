@@ -344,7 +344,9 @@ history → the frontend shows `—`).
 read `lastSnapshotDay` and skip); the 35-slot scan is a view, free off-chain. The ring is
 **informational only** — no admin, write-once-per-day, touches no vault accounting; the only mutable
 storage on the otherwise-immutable vault is `poolKey` (constructor), `inceptionTime` (write-once on
-first deposit), and this ring. `block.timestamp` here is benign (daily granularity — nothing of value
+first deposit), this ring, and the lifetime fee counters `totalFeesVlt`/`totalFeesUsdc`
+(informational too: incremented at every fee-collection point, always equal to
+Σ `Compound` + Σ `FeesRetained` event fees). `block.timestamp` here is benign (daily granularity — nothing of value
 depends on sub-day precision) and the post-unlock snapshot is a benign reentrancy pattern
 (`nonReentrant`, flash-accounting already settled); both are suppressed at the linter with
 justifications, so Solhint/Slither stay clean.

@@ -128,8 +128,10 @@ Out of scope: `@uniswap/v4-core`, `@uniswap/v4-periphery`, `@openzeppelin/contra
 
 **Mutable state** on the otherwise-immutable vault is limited to: OZ ERC-20 share
 accounting, `poolKey` (constructor write-once), `inceptionTime` (write-once on first
-deposit), and the informational 35-slot L/share snapshot ring. There is nothing an admin
-key could touch because there is no admin key.
+deposit), the informational 35-slot L/share snapshot ring, and the informational lifetime
+fee counters `totalFeesVlt`/`totalFeesUsdc` (July 16, 2026 — see §7d; incremented at every
+fee-collection point so they always equal Σ `Compound` + Σ `FeesRetained`, asserted by
+test). There is nothing an admin key could touch because there is no admin key.
 
 **Core invariants** (all verified in code and exercised by `test/vault.invariants.test.js`):
 
@@ -636,6 +638,17 @@ mint nobody shares, and `MINIMUM_LIQUIDITY` keeps inflation griefing a ~1000:1 m
 The former exact-issuance test was replaced by a socialization-semantics test. This also
 narrows I-10's JIT-capture window: above the $100 trigger, pending value is crystallized
 into L *before* the joiner's shares are priced.
+
+**Lifetime fee counters (July 16, 2026):** public `totalFeesVlt`/`totalFeesUsdc` added —
+informational, incremented via an internal `_recordFees` at all three fee-collection points
+(`_onDeposit`/`_onRedeem` retention pokes + the compound leg's fresh harvest), replacing the
+`_toVltUsdc` call each event site already made, so counters and events cannot drift (the
+identity `totals == Σ Compound + Σ FeesRetained` is asserted exactly in `vault.fees.test.js`).
+Compound-only recording was deliberately rejected: it would under-count every redeem and
+below-threshold-deposit harvest — the same under-reporting §7a fixed for events. The writes
+occur after trusted-PoolManager calls inside the guarded unlock (three `reentrancy-benign`
+suppressions extended with justification; Slither re-run: 0). Gas: ~+44k on the first
+triggering deposit (two cold SSTOREs), ~+10k warm; quiet deposits unchanged.
 
 **Cap removal (same day):** `REBALANCE_CAP_MULT` and the fresh-fee sizing of the rebalance
 swap were removed — see the L-01 "Remediation revisited" note for the full rationale

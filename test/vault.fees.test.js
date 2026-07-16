@@ -173,5 +173,24 @@ describe("VltUsdcVault — fees stay with the vault on deposit/redeem (BUG-1 fix
     const [cmpFee0, cmpFee1] = to01(evCmp.vltFees, evCmp.usdcFees);
     near(cmpFee0, freshCmp0, 300, "Compound fees (full fresh harvest, currency0 side)");
     near(cmpFee1, freshCmp1, 300, "Compound fees (currency1 side)");
+
+    // 4. Lifetime counters: totalFeesVlt/Usdc are incremented at every collection point, so after
+    //    exercising all three paths they must equal the events identity EXACTLY (no drift — the
+    //    counters and events are computed from the same _recordFees call). NOTE: the triggering
+    //    deposit's own _onDeposit poke can retain a sliver accrued between the compound leg and
+    //    the add in the same tx — fold in any FeesRetained from the compound receipt too.
+    let trigRetVlt = 0n;
+    let trigRetUsdc = 0n;
+    try {
+      const evTrigRet = await getEvent(ctx.vault, rcCmp, "FeesRetained");
+      trigRetVlt = evTrigRet.vltFees;
+      trigRetUsdc = evTrigRet.usdcFees;
+    } catch (e) { /* no FeesRetained in the trigger tx — nothing accrued between the legs */ }
+    expect(await ctx.vault.totalFeesVlt()).to.equal(
+      evRedeem.vltFees + evDep.vltFees + evCmp.vltFees + trigRetVlt
+    );
+    expect(await ctx.vault.totalFeesUsdc()).to.equal(
+      evRedeem.usdcFees + evDep.usdcFees + evCmp.usdcFees + trigRetUsdc
+    );
   });
 });
