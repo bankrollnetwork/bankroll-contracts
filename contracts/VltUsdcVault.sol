@@ -236,7 +236,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         IPoolManager _poolManager,
         PoolKey memory _key,
         address _usdc
-    ) ERC20("VLT-USDC LP", "vltUSDC") {
+    ) ERC20("Bankroll VLT-USDC LP", "vltUSDC") {
         require(address(_key.hooks) == address(0), "hooks-not-allowed");
         require(Currency.unwrap(_key.currency0) < Currency.unwrap(_key.currency1), "token-order");
 
