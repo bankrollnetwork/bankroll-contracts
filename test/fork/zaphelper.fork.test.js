@@ -106,7 +106,7 @@ d("ZapHelper — real Universal Router + Permit2 (mainnet fork)", () => {
 
     const before = await outErc.balanceOf(alice.address);
     await (
-      await zap.connect(alice).zap(MAINNET.usdc, tokenOut, amountIn, 1n, alice.address, swapData)
+      await zap.connect(alice).zap(MAINNET.usdc, tokenOut, amountIn, 1n, ethers.MaxUint256, alice.address, swapData)
     ).wait();
     const received = (await outErc.balanceOf(alice.address)) - before;
 
@@ -119,7 +119,7 @@ d("ZapHelper — real Universal Router + Permit2 (mainnet fork)", () => {
     // minOut is enforced: an unsatisfiable bound reverts.
     await fundUsdc(alice.address, amountIn);
     await expect(
-      zap.connect(alice).zap(MAINNET.usdc, tokenOut, amountIn, ethers.MaxUint256, alice.address, swapData)
+      zap.connect(alice).zap(MAINNET.usdc, tokenOut, amountIn, ethers.MaxUint256, ethers.MaxUint256, alice.address, swapData)
     ).to.be.reverted; // "zap-slippage" (or UR revert on the reused deadline) — either way it must not succeed
   });
 });

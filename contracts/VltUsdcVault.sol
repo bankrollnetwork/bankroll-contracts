@@ -44,8 +44,9 @@ pragma solidity 0.8.26;
     in the callback is the part most likely to contain a sign/settlement bug.
     Every `_settle`/`_take`/`modifyLiquidity` path is exercised by the Hardhat
     suite (test/) against a REAL PoolManager (local deploy + optional mainnet
-    fork). Not yet independently audited (Shieldify pending) — do not deploy
-    real funds before the audit.
+    fork). Shieldify review received 2026-07 (1 Medium / 3 Low / 8 Info against
+    4dae465; hardening applied — see AUDIT-SHIELDIFY-RESPONSE.md). Fixes-review
+    round pending — do not deploy real funds before it concludes.
 //////////////////////////////////////////////////////////////////////////*/
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -129,6 +130,10 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     // Full-range bounds, aligned to the pool's tick spacing.
     int24 public immutable tickLower;
     int24 public immutable tickUpper;
+
+    // The vault's single V4 position key — keccak of (this, tickLower, tickUpper, salt 0),
+    // all lifetime-fixed, so computed once at deploy (Shieldify I-06).
+    bytes32 public immutable positionKey;
 
     // Timestamp of the first deposit (when L/share == 1.0 and fee accrual begins). Write-once, 0
     // until then. Informational only — lets clients annualize the L/share fee growth into an APR
@@ -239,6 +244,18 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     ) ERC20("Bankroll VLT-USDC LP", "vltUSDC") {
         require(address(_key.hooks) == address(0), "hooks-not-allowed");
         require(Currency.unwrap(_key.currency0) < Currency.unwrap(_key.currency1), "token-order");
+        // The vault is immutable and ownerless — a misdeployment is unrecoverable, so the
+        // deployment contract is asserted on-chain, not only in scripts (Shieldify I-08).
+        // The 1% tier is part of the economics (prices manipulation, captures profit for holders).
+        require(_key.fee == 10000, "fee-not-1pct");
+        // spacing == 0 would otherwise surface as a raw division panic in the tick snap below.
+        require(_key.tickSpacing > 0, "bad-tick-spacing");
+        // Both legs must be ERC-20s; a native leg would be currency0 (address(0) sorts first).
+        require(Currency.unwrap(_key.currency0) != address(0), "native-not-allowed");
+        // Deploy order is pool-init -> vault; an uninitialized pool means a wrong key.
+        // slither-disable-next-line unused-return
+        (uint160 sqrtPriceX96,,,) = _poolManager.getSlot0(_key.toId());
+        require(sqrtPriceX96 != 0, "pool-not-initialized");
 
         poolManager = _poolManager;
         poolKey = _key;
@@ -257,9 +274,14 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         // tick-spacing multiple (the truncation IS the point), not a precision bug.
         int24 spacing = _key.tickSpacing;
         // slither-disable-next-line divide-before-multiply
-        tickLower = (TickMath.MIN_TICK / spacing) * spacing;
+        int24 lo = (TickMath.MIN_TICK / spacing) * spacing;
         // slither-disable-next-line divide-before-multiply
-        tickUpper = (TickMath.MAX_TICK / spacing) * spacing;
+        int24 hi = (TickMath.MAX_TICK / spacing) * spacing;
+        tickLower = lo;
+        tickUpper = hi;
+        // Every input is fixed for the contract's lifetime, so the position key is too
+        // (Shieldify I-06): computed once here, reused by every position read.
+        positionKey = Position.calculatePositionKey(address(this), lo, hi, bytes32(0));
     }
 
     /// @notice Shares are denominated in raw Uniswap liquidity (L) — integer L units, NOT a
@@ -277,7 +299,6 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// @notice Current liquidity (L) of the vault's single position, read live
     /// from the PoolManager — the single source of truth (no tracked mirror to desync).
     function positionLiquidity() public view returns (uint128 liq) {
-        bytes32 positionKey = Position.calculatePositionKey(address(this), tickLower, tickUpper, bytes32(0));
         liq = poolManager.getPositionLiquidity(poolKey.toId(), positionKey);
     }
 
@@ -297,7 +318,6 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     {
         // Pending pool fees, derived exactly as V4 credits them on the next modifyLiquidity:
         // liquidity × (feeGrowthInside_now − feeGrowthInside_last), in Q128. No state change.
-        bytes32 positionKey = Position.calculatePositionKey(address(this), tickLower, tickUpper, bytes32(0));
         (uint128 liq, uint256 fg0Last, uint256 fg1Last) = poolManager.getPositionInfo(poolKey.toId(), positionKey);
         (uint256 fg0, uint256 fg1) = poolManager.getFeeGrowthInside(poolKey.toId(), tickLower, tickUpper);
         uint256 pending0;
@@ -328,6 +348,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         uint256 supply = totalSupply();
         // slither-disable-next-line incorrect-equality
         if (shares == 0 || supply == 0) return (0, 0);
+        // redeem()'s downcast is safe because _burn enforces shares <= supply; this view has no
+        // burn, so bound the input instead of returning a silently truncated quote (Shieldify I-05).
+        require(shares <= supply, "shares-exceed-supply");
         uint128 liquidityToRemove = uint128((uint256(positionLiquidity()) * shares) / supply);
         // slither-disable-next-line incorrect-equality
         if (liquidityToRemove == 0) return (0, 0);
@@ -390,6 +413,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         address recipient
     ) external nonReentrant returns (uint256 shares) {
         require(recipient != address(0), "zero-recipient");
+        // Shares minted to the vault itself would be unredeemable forever — redeem() burns only
+        // msg.sender's shares and the vault never calls itself (Shieldify I-07 footgun guard).
+        require(recipient != address(this), "self-recipient");
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
         // solhint-disable not-rely-on-time
         // slither-disable-next-line timestamp
@@ -453,6 +479,10 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
             shares = (supply * liquidityAdded) / liqBefore;
         }
 
+        // After compounds L/share > 1, so a dust deposit can floor to zero shares while its
+        // liquidity sticks to the position. Reject it even at minShares == 0 (Shieldify L-01;
+        // UniswapV2's INSUFFICIENT_LIQUIDITY_MINTED precedent).
+        require(shares > 0, "zero-shares-minted");
         require(shares >= minShares, "slippage-shares");
         _mint(recipient, shares);
         (uint256 vltUsed, uint256 usdcUsed) = _toVltUsdc(paid0, paid1);
@@ -553,12 +583,16 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         lastSnapshotDay = day;
     }
 
-    /// @notice Trailing fee-growth APR in basis points over the lifetime, ~7-day, and ~30-day windows,
-    /// derived from the L/share daily ring. Each is annualized by the ACTUAL elapsed time between the
-    /// matched snapshot and now. A window returns 0 when there isn't a snapshot at least that old yet
-    /// (insufficient history). NOTE: cadence-dependent guidance, not a guarantee — sparse or clustered
-    /// compounds make short windows noisy. Reflects compounded fees only (pending fees live in
-    /// compoundClaimable). View-only; the 30-slot scan costs nothing off-chain.
+    /// @notice Trailing L-per-share growth APR in basis points over the lifetime, ~7-day, and
+    /// ~30-day windows, derived from the L/share daily ring. Each is annualized by the ACTUAL
+    /// elapsed time between the matched snapshot and now. A window returns 0 when there isn't a
+    /// snapshot at least that old yet (insufficient history). NOTE: cadence-dependent guidance,
+    /// not a guarantee — sparse or clustered compounds make short windows noisy. The metric is
+    /// provenance-blind (Shieldify I-01): it measures ALL compounded no-mint liquidity growth per
+    /// share — organic trading fees, pool/vault donations, redemption-forfeited value concentrating
+    /// on remaining shares, and rounding dust — every source of which accrues to holders. Pending
+    /// (uncompounded) value lives in compoundClaimable and is NOT reflected until compounded.
+    /// View-only; the 30-slot scan costs nothing off-chain.
     function feeApr() external view returns (uint256 lifetimeBps, uint256 d7Bps, uint256 d30Bps) {
         uint256 supply = totalSupply();
         // slither-disable-next-line incorrect-equality

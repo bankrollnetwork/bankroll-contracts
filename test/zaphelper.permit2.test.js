@@ -54,13 +54,13 @@ describe("ZapHelper — Permit2 branch (Universal-Router-style pull)", () => {
 
     const out = await ctx.zap
       .connect(ctx.alice)
-      .zap.staticCall(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn, ctx.alice.address, swapData);
+      .zap.staticCall(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn, ethers.MaxUint256, ctx.alice.address, swapData);
     expect(out).to.equal(amountIn); // mock router is 1:1 raw
 
     await (
       await ctx.zap
         .connect(ctx.alice)
-        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn, ctx.alice.address, swapData)
+        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn, ethers.MaxUint256, ctx.alice.address, swapData)
     ).wait();
 
     // Alice received the output; the helper kept nothing (stateless) and the Permit2 allowance
@@ -84,7 +84,7 @@ describe("ZapHelper — Permit2 branch (Universal-Router-style pull)", () => {
     await (
       await ctx.zap
         .connect(ctx.alice)
-        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, consumed, ctx.deployer.address, swapData)
+        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, consumed, ethers.MaxUint256, ctx.deployer.address, swapData)
     ).wait();
 
     expect(await ctx.tokenOut.balanceOf(ctx.deployer.address)).to.equal(consumed); // output → recipient
@@ -103,7 +103,7 @@ describe("ZapHelper — Permit2 branch (Universal-Router-style pull)", () => {
     await expect(
       ctx.zap
         .connect(ctx.alice)
-        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn + 1n, ctx.alice.address, swapData)
+        .zap(ctx.tokenIn.target, ctx.tokenOut.target, amountIn, amountIn + 1n, ethers.MaxUint256, ctx.alice.address, swapData)
     ).to.be.revertedWith("zap-slippage");
   });
 });

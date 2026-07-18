@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IZapHelper {
     function router() external view returns (address);
@@ -12,6 +13,7 @@ interface IZapHelper {
         address tokenOut,
         uint256 amountIn,
         uint256 minOut,
+        uint256 deadline,
         address recipient,
         bytes calldata swapData
     ) external returns (uint256 amountOut);
@@ -57,9 +59,12 @@ interface IVltUsdcVault {
     any dust returns to the caller. `zap(...)` exposes the raw swap primitive.
 
     Immutable router (+ optional Permit2) and immutable vault. No owner, no custody —
-    holds tokens only transiently within a call.
+    holds tokens only transiently within a call. Both entrypoints are nonReentrant
+    (Shieldify I-03): the custody-free isolation ("holds nothing between calls") is
+    enforced by construction rather than assumed across the arbitrary router call
+    and any callback-capable token, since _sweep()/usdcForLp read FULL balances.
 //////////////////////////////////////////////////////////////////////////*/
-contract ZapHelper is IZapHelper {
+contract ZapHelper is IZapHelper, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     /// @notice The only contract this helper will ever call to swap (the router).
@@ -101,7 +106,7 @@ contract ZapHelper is IZapHelper {
         uint256 deadline,
         address recipient,
         bytes calldata swapData
-    ) external returns (uint256 shares) {
+    ) external nonReentrant returns (uint256 shares) {
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
         // solhint-disable not-rely-on-time
         // slither-disable-next-line timestamp
@@ -134,15 +139,23 @@ contract ZapHelper is IZapHelper {
     /// @notice Raw swap primitive: pull `amountIn` of `tokenIn`, execute the route, forward the
     /// resulting `tokenOut` (>= minOut) to `recipient`, and refund any unspent `tokenIn` to the
     /// CALLER (who paid it — `recipient` is an output destination only). `swapData` must route
-    /// the output to THIS helper (it measures its own balance delta).
+    /// the output to THIS helper (it measures its own balance delta). Reverts after `deadline`
+    /// (Shieldify I-04, matching zapDeposit) so a stale mempool transaction cannot execute an
+    /// old route under moved market terms.
     function zap(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint256 minOut,
+        uint256 deadline,
         address recipient,
         bytes calldata swapData
-    ) external returns (uint256 amountOut) {
+    ) external nonReentrant returns (uint256 amountOut) {
+        // Standard periphery-style deadline; second-level miner drift is irrelevant here.
+        // solhint-disable not-rely-on-time
+        // slither-disable-next-line timestamp
+        require(block.timestamp <= deadline, "expired");
+        // solhint-enable not-rely-on-time
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         amountOut = _execRoute(tokenIn, tokenOut, amountIn, minOut, swapData);
         IERC20(tokenOut).safeTransfer(recipient, amountOut);
