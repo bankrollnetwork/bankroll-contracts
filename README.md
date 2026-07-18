@@ -373,22 +373,29 @@ justifications, so Solhint/Slither stay clean.
   dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
   depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile
   relative to the amount reinvested.
+- **Bounded fee-timing socialization (Shieldify M-01/L-02, accepted as design):** value outside
+  position liquidity (pending pool fees + retained balances + dust) is a common pool that folds
+  forward at the next compound; shares enter and exit priced on `L` only. The bound is
+  structural: `deposit()` compounds **before** minting whenever claimable ≥ $100, so an entrant
+  can never buy into ≥$100 of common-pool value — and an exiting holder forfeits at most their
+  pro-rata slice of that same bounded pool (they can fold it in themselves first with a dust
+  deposit whenever the gate is open). The transfer is bidirectional and nets ~zero across the
+  holder population. The alternative — full-inventory share pricing — would require valuing
+  both tokens at spot inside every permissionless call, exactly the manipulation surface the
+  oracle-free design exists to avoid.
 
 ## Remaining before mainnet
 
 What this workspace does **not** yet do:
 
-1. **Shieldify audit** — resolve findings, then re-run `npm test` (+ fork suite). Scope to flag:
-   the V4 fee-settlement path (the fee-retention split) and that the `feesAccrued`/principal split is complete
-   across every callback; the **deposit-triggered auto-compound** (see AUDIT.MD §7d: the
-   internal `_compound()` leg with no external entrypoint, the shared-fate coupling — a
-   reverting compound leg blocks threshold-crossing deposits — the M-01 pre-seed gate, the
-   $100 trigger constant, and the donation-socialization semantics that replaced donation
-   inertness); and the **ZapHelper / external-sourcing
-   path** (deposit's dependency on VLT's external market, the
-   arbitrary-`swapData`-to-whitelisted-router pattern, and MEV/slippage bounded by `minVltOut`).
-   NOTE: `AUDIT.MD` line citations are anchored to `main` @ `f6c6e88` (July 14, 2026) —
-   re-verify them, plus Slither (`npm run slither`) + the suite, after any contract change.
+1. **Shieldify fixes-review** — the review landed 2026-07-17 (1 Medium / 3 Low / 8 Info
+   against `4dae465`); the hardening batch is applied and the per-finding responses live in
+   `AUDIT-SHIELDIFY-RESPONSE.md` (M-01/L-02 accepted as bounded-by-design socialization —
+   see Design decisions — I-02 disputed as citing removed code, the rest fixed). Remaining:
+   send the Team Responses, then the fixes-review round on the hardened commit.
+   NOTE: `AUDIT.MD`/`AUDIT-CODEX.md` line citations are re-anchored after every contract
+   change (currently the Shieldify-hardening source) — re-verify them, plus Slither
+   (`npm run slither`) + the suite, after any contract change.
 2. **Mainnet pool init + deploy + verify** — requires a funded key + archive RPC; the scripts
    above are ready. Publish the vault address into the pitch's Parameters table afterward.
 

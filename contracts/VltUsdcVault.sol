@@ -39,6 +39,16 @@ pragma solidity 0.8.26;
         Covered by test/vault.fees.test.js.
       - Compound residual dust folds forward into the next compound: it is
         never counted in shares, so it can only ever raise future NAV.
+      - Bounded fee-timing socialization (accepted design; Shieldify M-01/L-02):
+        value outside L (pending fees + retained balances + dust) is a common
+        pool for ALL holders; shares enter and exit priced on L only. Because
+        deposit() compounds BEFORE minting whenever claimable >= $100, an
+        entrant can never buy into >= $100 of common-pool value, and an exit
+        forfeits at most its pro-rata slice of that same bounded pool (fold it
+        in first with a dust deposit if the gate is open). Bidirectional and
+        ~zero-sum across holders; the alternative (full-inventory share
+        pricing) would need spot valuation inside every permissionless call —
+        the exact manipulation surface this oracle-free design avoids.
 
     NOTE (read before deploying): the V4 unlock/settle/take delta accounting
     in the callback is the part most likely to contain a sign/settlement bug.
