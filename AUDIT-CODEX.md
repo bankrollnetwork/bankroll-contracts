@@ -7,7 +7,7 @@
 | Reviewer | Codex |
 | Original review date | July 10, 2026 |
 | Current-source update | July 14, 2026 |
-| Context | Second-opinion review updated for the current keeperless, deposit-triggered auto-compound contract. All source citations below use current GitHub-style line anchors (re-anchored to `main` @ `228e632` after the REBALANCE_CAP_MULT removal and the July 16 totalFees counters). |
+| Context | Second-opinion review updated for the current keeperless, deposit-triggered auto-compound contract. All source citations below use current GitHub-style line anchors (re-anchored to `main` @ `d6b36d2` after the REBALANCE_CAP_MULT removal and the July 16 totalFees counters). |
 
 ## Executive Summary
 
@@ -37,11 +37,11 @@ With the project economics made explicit, I consider this a clean audit: no Crit
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:400-414](contracts/VltUsdcVault.sol#L400-L414) - `deposit()` checks `compoundClaimable()` and runs `_compound()` before measuring this depositor's liquidity when the threshold is met.
-- [contracts/VltUsdcVault.sol:416-459](contracts/VltUsdcVault.sol#L416-L459) - `deposit()` snapshots retained balances, pulls the depositor's tokens, adds only the depositor contribution, and mints shares from actual added liquidity.
-- [contracts/VltUsdcVault.sol:632-684](contracts/VltUsdcVault.sol#L632-L684) - `_onDeposit()` harvests pending V4 fees into retained vault balances, then adds only the depositor contribution.
-- [contracts/VltUsdcVault.sol:476-505](contracts/VltUsdcVault.sol#L476-L505) - `redeem()` removes pro-rata position liquidity only.
-- [contracts/VltUsdcVault.sol:691-729](contracts/VltUsdcVault.sol#L691-L729) - `_onRedeem()` subtracts accrued fees from the redeemer payout and retains them for remaining holders.
+- [contracts/VltUsdcVault.sol:426-440](contracts/VltUsdcVault.sol#L426-L440) - `deposit()` checks `compoundClaimable()` and runs `_compound()` before measuring this depositor's liquidity when the threshold is met.
+- [contracts/VltUsdcVault.sol:442-489](contracts/VltUsdcVault.sol#L442-L489) - `deposit()` snapshots retained balances, pulls the depositor's tokens, adds only the depositor contribution, and mints shares from actual added liquidity.
+- [contracts/VltUsdcVault.sol:666-718](contracts/VltUsdcVault.sol#L666-L718) - `_onDeposit()` harvests pending V4 fees into retained vault balances, then adds only the depositor contribution.
+- [contracts/VltUsdcVault.sol:506-535](contracts/VltUsdcVault.sol#L506-L535) - `redeem()` removes pro-rata position liquidity only.
+- [contracts/VltUsdcVault.sol:725-763](contracts/VltUsdcVault.sol#L725-L763) - `_onRedeem()` subtracts accrued fees from the redeemer payout and retains them for remaining holders.
 
 ### Description
 
@@ -67,12 +67,12 @@ Keep the design if this is the intended policy, but document it directly:
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:284-319](contracts/VltUsdcVault.sol#L284-L319) - `compoundClaimable()` values retained balances plus pending fees at live pool spot.
-- [contracts/VltUsdcVault.sol:400-414](contracts/VltUsdcVault.sol#L400-L414) - `deposit()` triggers `_compound()` once claimable value reaches `AUTO_COMPOUND_MIN_USDC` and the position exists.
-- [contracts/VltUsdcVault.sol:512-532](contracts/VltUsdcVault.sol#L512-L532) - `_compound()` is internal only and runs through the V4 unlock path.
-- [contracts/VltUsdcVault.sol:736-776](contracts/VltUsdcVault.sol#L736-L776) - `_onCompound()` harvests fees, rebalances, then reinvests the full vault balance with no shares minted and no fee paid out.
-- [contracts/VltUsdcVault.sol:787-825](contracts/VltUsdcVault.sol#L787-L825) - `_addLiquidity()` reads current `slot0` and mints liquidity from desired token amounts.
-- [contracts/VltUsdcVault.sol:834-869](contracts/VltUsdcVault.sol#L834-L869) - `_rebalance()` swaps ~half the value-imbalance bounded by the ≤5% price limit *(post-review change — the fee-scaled cap it reviewed was removed; see the project note below)*.
+- [contracts/VltUsdcVault.sol:305-339](contracts/VltUsdcVault.sol#L305-L339) - `compoundClaimable()` values retained balances plus pending fees at live pool spot.
+- [contracts/VltUsdcVault.sol:426-440](contracts/VltUsdcVault.sol#L426-L440) - `deposit()` triggers `_compound()` once claimable value reaches `AUTO_COMPOUND_MIN_USDC` and the position exists.
+- [contracts/VltUsdcVault.sol:542-562](contracts/VltUsdcVault.sol#L542-L562) - `_compound()` is internal only and runs through the V4 unlock path.
+- [contracts/VltUsdcVault.sol:770-810](contracts/VltUsdcVault.sol#L770-L810) - `_onCompound()` harvests fees, rebalances, then reinvests the full vault balance with no shares minted and no fee paid out.
+- [contracts/VltUsdcVault.sol:821-859](contracts/VltUsdcVault.sol#L821-L859) - `_addLiquidity()` reads current `slot0` and mints liquidity from desired token amounts.
+- [contracts/VltUsdcVault.sol:868-903](contracts/VltUsdcVault.sol#L868-L903) - `_rebalance()` swaps ~half the value-imbalance bounded by the ≤5% price limit *(post-review change — the fee-scaled cap it reviewed was removed; see the project note below)*.
 
 ### Description
 
@@ -109,11 +109,11 @@ No mandatory code change if the current economic model is accepted. Recommended 
 
 **Current locations:**
 
-- [contracts/VltUsdcVault.sol:71-73](contracts/VltUsdcVault.sol#L71-L73) - ownerless/immutable design statement.
-- [contracts/VltUsdcVault.sol:232-262](contracts/VltUsdcVault.sol#L232-L262) - constructor fixes pool identity, requires no hooks, and labels USDC/VLT.
-- [contracts/VltUsdcVault.sol:371-459](contracts/VltUsdcVault.sol#L371-L459) - `deposit()` is permissionless and includes the internal compound trigger.
-- [contracts/VltUsdcVault.sol:476-505](contracts/VltUsdcVault.sol#L476-L505) - `redeem()` remains permissionless and in-kind.
-- [contracts/VltUsdcVault.sol:512-532](contracts/VltUsdcVault.sol#L512-L532) - compounding is internal only; there is no admin or keeper function.
+- [contracts/VltUsdcVault.sol:72-74](contracts/VltUsdcVault.sol#L72-L74) - ownerless/immutable design statement.
+- [contracts/VltUsdcVault.sol:237-284](contracts/VltUsdcVault.sol#L237-L284) - constructor fixes pool identity, requires no hooks, and labels USDC/VLT.
+- [contracts/VltUsdcVault.sol:394-489](contracts/VltUsdcVault.sol#L394-L489) - `deposit()` is permissionless and includes the internal compound trigger.
+- [contracts/VltUsdcVault.sol:506-535](contracts/VltUsdcVault.sol#L506-L535) - `redeem()` remains permissionless and in-kind.
+- [contracts/VltUsdcVault.sol:542-562](contracts/VltUsdcVault.sol#L542-L562) - compounding is internal only; there is no admin or keeper function.
 
 ### Description
 
@@ -137,10 +137,10 @@ Accept if ownerlessness is the intended trust model. Document the shared-fate be
 
 **Current locations:**
 
-- [contracts/ZapHelper.sol:96-131](contracts/ZapHelper.sol#L96-L131) - `zapDeposit()` pulls USDC, routes through the router, deposits into the vault, and sweeps leftover VLT/USDC to the caller.
-- [contracts/ZapHelper.sol:134-149](contracts/ZapHelper.sol#L134-L149) - raw `zap()` forwards output and refunds unspent input to the caller.
-- [contracts/ZapHelper.sol:154-186](contracts/ZapHelper.sol#L154-L186) - `_execRoute()` sets either direct router approval or Permit2 approval, executes the router call, checks measured output, and clears only the direct router approval path.
-- [contracts/ZapHelper.sol:189-193](contracts/ZapHelper.sol#L189-L193) - `_sweep()` forwards the helper's full token balance.
+- [contracts/ZapHelper.sol:101-136](contracts/ZapHelper.sol#L101-L136) - `zapDeposit()` pulls USDC, routes through the router, deposits into the vault, and sweeps leftover VLT/USDC to the caller.
+- [contracts/ZapHelper.sol:139-162](contracts/ZapHelper.sol#L139-L162) - raw `zap()` forwards output and refunds unspent input to the caller.
+- [contracts/ZapHelper.sol:167-199](contracts/ZapHelper.sol#L167-L199) - `_execRoute()` sets either direct router approval or Permit2 approval, executes the router call, checks measured output, and clears only the direct router approval path.
+- [contracts/ZapHelper.sol:202-206](contracts/ZapHelper.sol#L202-L206) - `_sweep()` forwards the helper's full token balance.
 
 ### Description
 

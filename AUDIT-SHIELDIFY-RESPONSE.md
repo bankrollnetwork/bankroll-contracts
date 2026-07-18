@@ -129,11 +129,12 @@ re-anchored.** Two parts:
 **Draft Team Response:** Acknowledged for donation-created states, with a correction: the
 REBALANCE_CAP_MULT passage analyzes code removed in `435d940`, before the review commit —
 please re-anchor the finding to the `_rebalance(r0, r1)` implementation at `4dae465` and
-re-run the PoC against it. Design position: the vault performs no donations and ordinary fee
-states were shown unprofitable by your own controls; we are adding a binding constraint to the
-integration docs that any future protocol fee routing must donate in value-balanced pairs
-and/or tranches below the demonstrated profitability floor, and we confirm `donate()`-based
-routing is not part of current operations. [PENDING USER CONFIRMATION on future routing plans.]
+re-run the PoC against it. Design position: **we confirm `PoolManager.donate()` is not and
+will not be part of protocol operations** — the vault performs no donations, no in-scope
+component donates, and ecosystem fee routing will not use `donate()` (this is now a documented
+binding constraint: any future routing mechanism must not make large one-sided donations to
+the pool). Ordinary fee states were shown unprofitable by your own controls. Per the finding's
+own severity condition, the issue remains Low under the confirmed deployment model.
 
 ### I-01 — feeApr provenance (Info)
 
@@ -214,13 +215,19 @@ purity); fee-routing donation constraint (L-03); re-anchor audit citations after
 correction/withdrawal of I-02 and re-anchor of L-03's cap section to `4dae465`; dispute M-01 →
 Low; request the fixes-review round on the Batch A commit.
 
-## Decisions needed
+## Decisions (resolved 2026-07-17)
 
-1. **Will ecosystem fee routing ever use `PoolManager.donate()`?** Shieldify explicitly
-   conditions L-03's severity on this. If yes, we design the balanced/tranched constraint now
-   and say so; if no, we state that and L-03 stays Low/acknowledged.
-2. **Hardcode `fee == 10000` in the constructor?** Locks the contract to 1% pools — matches the
-   pitch and the manipulation-pricing argument, but forecloses redeploying the same bytecode on
-   another tier.
-3. **Confirm accept-as-design for M-01/L-02** (no mitigation code), so the severity dispute and
-   docs language go out as drafted.
+1. **Fee routing will NOT use `PoolManager.donate()`** — confirmed. L-03 stays Low per the
+   finding's own severity condition; the no-large-one-sided-donations rule is documented as a
+   binding constraint on any future routing mechanism.
+2. **`fee == 10000` hardcoded in the constructor** — done (I-08 batch).
+3. **M-01/L-02 accepted as design** — the severity dispute and docs language go out as drafted.
+
+## Status
+
+- Batch A (code hardening) implemented: L-01, I-03, I-04, I-05, I-06, I-07, I-08, I-01 NatSpec.
+  71 tests green (61 existing + 10 new in `test/audit.hardening.test.js`), Slither 0, Solhint
+  clean. Gas re-measured (GASNOTES.md): vault paths −0.5k, zap paths +1.6–3.8k.
+- Client updated for the `zap(deadline)` ABI change and the APR label.
+- Remaining: send Batch C responses to Shieldify; request I-02 withdrawal and L-03 re-anchor;
+  fixes-review round on the hardening commit.
