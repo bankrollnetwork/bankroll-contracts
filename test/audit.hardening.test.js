@@ -53,14 +53,17 @@ describe("Shieldify hardening", () => {
     });
   });
 
-  describe("I-05: previewRedeem input bound", () => {
-    it("reverts on shares > totalSupply instead of returning a truncated quote", async () => {
+  describe("I-05: previewRedeem input clamp", () => {
+    it("never reverts: out-of-range shares clamp to the full-supply quote", async () => {
       const ctx = await loadFixture(deployVaultFixture);
       await (await deposit(ctx, ctx.alice, USDC(10_000))).wait();
       const supply = await ctx.vault.totalSupply();
-      await expect(ctx.vault.previewRedeem(supply + 1n)).to.be.revertedWith("shares-exceed-supply");
-      const [v, u] = await ctx.vault.previewRedeem(supply); // full-supply quote still works
-      expect(v + u).to.be.greaterThan(0n);
+      const [fullV, fullU] = await ctx.vault.previewRedeem(supply);
+      expect(fullV + fullU).to.be.greaterThan(0n);
+      // supply+1 and an absurd input (the old uint128-truncation case) both return the ceiling.
+      expect(await ctx.vault.previewRedeem(supply + 1n)).to.deep.equal([fullV, fullU]);
+      expect(await ctx.vault.previewRedeem(2n ** 200n)).to.deep.equal([fullV, fullU]);
+      expect(await ctx.vault.previewRedeem(ethers.MaxUint256)).to.deep.equal([fullV, fullU]);
     });
   });
 

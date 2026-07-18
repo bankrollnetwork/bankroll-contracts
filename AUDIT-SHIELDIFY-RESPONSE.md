@@ -18,7 +18,7 @@ Shieldify needs before the report is finalized.
 | I-02 | **Not applicable — premised entirely on code removed before the review commit** | Dispute (stale code) |
 | I-03 | Valid hardening | Fix: ReentrancyGuard on ZapHelper |
 | I-04 | Valid | Fix: `zap()` deadline (ABI change; 2 client call sites) |
-| I-05 | Valid (view-only) | Fix: bound `shares` in previewRedeem |
+| I-05 | Valid (view-only) | Fix: clamp `shares` in previewRedeem (never reverts) |
 | I-06 | Valid gas nit | Fix: immutable positionKey |
 | I-07 | Valid footgun | Fix: `require(recipient != address(this))` |
 | I-08 | Partially valid | Fix: cheap constructor asserts |
@@ -173,8 +173,11 @@ check before pulling tokens. ABI change — update the two client call sites
 ### I-05 — previewRedeem out-of-range (Info)
 
 **Verdict: valid, view-only.** `redeem()`'s downcast is provably safe (burn enforces
-`shares ≤ supply`); the preview has no bound. **Fix:**
-`require(shares <= totalSupply(), "shares-exceed-supply")`.
+`shares ≤ supply`); the preview had no bound and could silently truncate. **Fix:** out-of-range
+input is CLAMPED to the full-supply quote (`if (shares > supply) shares = supply`) rather than
+reverting — a preview is a UI feed and must always return a workable number; the clamp keeps
+the downcast in range, so the truncated-quote defect is gone. (We deliberately did not adopt
+the report's `require` suggestion: quotes never revert.)
 
 ### I-06 — Position key recompute (Info)
 
@@ -225,7 +228,7 @@ Low; request the fixes-review round on the Batch A commit.
 
 ## Status
 
-- Batch A (code hardening) implemented: L-01, I-03, I-04, I-05, I-06, I-07, I-08, I-01 NatSpec.
+- Batch A (code hardening) implemented: L-01, I-03, I-04, I-05 (clamp, not revert), I-06, I-07, I-08, I-01 NatSpec.
   71 tests green (61 existing + 10 new in `test/audit.hardening.test.js`), Slither 0, Solhint
   clean. Gas re-measured (GASNOTES.md): vault paths −0.5k, zap paths +1.6–3.8k.
 - Client updated for the `zap(deadline)` ABI change and the APR label.

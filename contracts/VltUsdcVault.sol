@@ -348,9 +348,9 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         uint256 supply = totalSupply();
         // slither-disable-next-line incorrect-equality
         if (shares == 0 || supply == 0) return (0, 0);
-        // redeem()'s downcast is safe because _burn enforces shares <= supply; this view has no
-        // burn, so bound the input instead of returning a silently truncated quote (Shieldify I-05).
-        require(shares <= supply, "shares-exceed-supply");
+        // redeem()'s downcast is safe because _burn enforces shares <= supply. A preview must
+        // NEVER revert — clamp out-of-range input to the full-supply quote instead (Shieldify I-05).
+        if (shares > supply) shares = supply;
         uint128 liquidityToRemove = uint128((uint256(positionLiquidity()) * shares) / supply);
         // slither-disable-next-line incorrect-equality
         if (liquidityToRemove == 0) return (0, 0);
