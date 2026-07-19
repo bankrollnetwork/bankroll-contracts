@@ -1,4 +1,4 @@
-// donate(vltAmount, usdcAmount, deadline): the sanctioned no-mint gift path — adds balanced
+// donate(vltAmount, usdcAmount, donor, deadline): the sanctioned no-mint gift path — adds balanced
 // liquidity at the pool price for ALL current holders, refunds the short leg, mints nothing.
 // Covers the happy path (L rises, supply fixed, holder value up, refund exact), the no-holders
 // and deadline/zero guards, the compound-trigger interaction, the reentrancy guard, and a
@@ -57,7 +57,7 @@ describe("vault.donate", () => {
     const usdcAmt = USDC(200);
     const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
     const receipt = await (
-      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ethers.MaxUint256)
+      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, ethers.MaxUint256)
     ).wait();
     const ev = await eventArgs(ctx.vault, receipt, "Donate");
 
@@ -66,6 +66,7 @@ describe("vault.donate", () => {
     expect(await ctx.vault.totalSupply()).to.equal(supplyBefore);
 
     // The gift landed in L, and the event reports exactly that ΔL.
+    expect(ev.sender).to.equal(ctx.carol.address);
     expect(ev.donor).to.equal(ctx.carol.address);
     expect(ev.liquidityAdded).to.be.greaterThan(0n);
     expect(await ctx.vault.positionLiquidity()).to.equal(liqBefore + ev.liquidityAdded);
@@ -87,7 +88,7 @@ describe("vault.donate", () => {
     const usdcAmt = USDC(200);
     const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
     await expect(
-      ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ethers.MaxUint256)
+      ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, ethers.MaxUint256)
     ).to.be.revertedWith("no-holders");
   });
 
@@ -96,9 +97,9 @@ describe("vault.donate", () => {
     await (await deposit(ctx, ctx.alice, USDC(1_000))).wait();
     const usdcAmt = USDC(10);
     const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
-    await expect(ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, 0n)).to.be.revertedWith("expired");
-    await expect(ctx.vault.connect(ctx.carol).donate(0n, usdcAmt, ethers.MaxUint256)).to.be.revertedWith("zero-donation");
-    await expect(ctx.vault.connect(ctx.carol).donate(vltAmt, 0n, ethers.MaxUint256)).to.be.revertedWith("zero-donation");
+    await expect(ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, 0n)).to.be.revertedWith("expired");
+    await expect(ctx.vault.connect(ctx.carol).donate(0n, usdcAmt, ctx.carol.address, ethers.MaxUint256)).to.be.revertedWith("zero-donation");
+    await expect(ctx.vault.connect(ctx.carol).donate(vltAmt, 0n, ctx.carol.address, ethers.MaxUint256)).to.be.revertedWith("zero-donation");
   });
 
   it("folds >= $100 of claimable value BEFORE the donation (donor triggers the compound)", async () => {
@@ -109,7 +110,7 @@ describe("vault.donate", () => {
     const usdcAmt = USDC(50);
     const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
     const receipt = await (
-      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ethers.MaxUint256)
+      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, ethers.MaxUint256)
     ).wait();
 
     expect(await eventArgs(ctx.vault, receipt, "Compound")).to.not.equal(null);
@@ -130,11 +131,72 @@ describe("vault.donate", () => {
     await (await ctx.vlt.setMode(1 /* MODE_DEPOSIT */)).wait();
     await (await ctx.vlt.arm(true)).wait();
 
-    await (await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ethers.MaxUint256)).wait();
+    await (await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, ethers.MaxUint256)).wait();
     expect(await ctx.vlt.reentryAttempted()).to.equal(true);
     expect(await ctx.vlt.reentryReverted()).to.equal(true);
     const selector = ethers.id("ReentrancyGuardReentrantCall()").slice(0, 10);
     expect((await ctx.vlt.lastError()).slice(0, 10)).to.equal(selector);
+  });
+
+  it("attributes the gift to `donor` while pulling from and refunding the payer", async () => {
+    const ctx = await loadFixture(deployVaultFixture);
+    await (await deposit(ctx, ctx.alice, USDC(1_000))).wait();
+    const usdcAmt = USDC(50);
+    const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
+    const receipt = await (
+      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.bob.address, ethers.MaxUint256)
+    ).wait();
+    const ev = await eventArgs(ctx.vault, receipt, "Donate");
+    expect(ev.sender).to.equal(ctx.carol.address); // payer
+    expect(ev.donor).to.equal(ctx.bob.address);    // attributed gift-giver
+    // Refund still goes to the payer, never the attributed donor.
+    expect(await ctx.usdc.balanceOf(ctx.carol.address)).to.equal(usdcAmt - ev.usdcUsed);
+    expect(await ctx.usdc.balanceOf(ctx.bob.address)).to.equal(0n);
+    await expect(
+      ctx.vault.connect(ctx.carol).donate(1n, 1n, ethers.ZeroAddress, ethers.MaxUint256)
+    ).to.be.revertedWith("zero-donor");
+  });
+
+  it("zapDonate: USDC-only gift through the helper — no shares, donor credited, dust swept back", async () => {
+    const ctx = await loadFixture(deployVaultFixture);
+    await (await deposit(ctx, ctx.alice, USDC(10_000))).wait();
+
+    const supplyBefore = await ctx.vault.totalSupply();
+    const liqBefore = await ctx.vault.positionLiquidity();
+
+    const usdcAmt = USDC(500);
+    const swapUsdcToVlt = usdcAmt / 2n;
+    const swapData = ctx.mockRouter.interface.encodeFunctionData("swapUsdcForVlt", [
+      swapUsdcToVlt,
+      ctx.zapHelper.target,
+    ]);
+    await (await ctx.usdc.mint(ctx.carol.address, usdcAmt)).wait();
+    await (await ctx.usdc.connect(ctx.carol).approve(ctx.zapHelper.target, ethers.MaxUint256)).wait();
+
+    const receipt = await (
+      await ctx.zapHelper
+        .connect(ctx.carol)
+        .zapDonate(usdcAmt, swapUsdcToVlt, 0n, ethers.MaxUint256, ctx.carol.address, swapData)
+    ).wait();
+    const ev = await eventArgs(ctx.vault, receipt, "Donate");
+
+    // Vault event: helper paid, carol is the credited donor.
+    expect(ev.sender).to.equal(ctx.zapHelper.target);
+    expect(ev.donor).to.equal(ctx.carol.address);
+    expect(ev.liquidityAdded).to.be.greaterThan(0n);
+
+    // No shares minted anywhere; the gift landed in L.
+    expect(await ctx.vault.totalSupply()).to.equal(supplyBefore);
+    expect(await ctx.vault.balanceOf(ctx.carol.address)).to.equal(0n);
+    expect(await ctx.vault.balanceOf(ctx.zapHelper.target)).to.equal(0n);
+    expect(await ctx.vault.positionLiquidity()).to.equal(liqBefore + ev.liquidityAdded);
+
+    // Custody-free: the helper keeps nothing; dust sweeps back to carol.
+    expect(await ctx.usdc.balanceOf(ctx.zapHelper.target)).to.equal(0n);
+    expect(await ctx.vlt.balanceOf(ctx.zapHelper.target)).to.equal(0n);
+    const spent = usdcAmt - (await ctx.usdc.balanceOf(ctx.carol.address));
+    expect(spent).to.be.greaterThan(0n);
+    expect(spent).to.be.lessThanOrEqual(usdcAmt);
   });
 
   // CHARACTERIZATION of the documented JIT caveat (header + NatSpec): a large one-shot donation
@@ -154,7 +216,7 @@ describe("vault.donate", () => {
     const usdcAmt = USDC(1_000);
     const vltAmt = await fundForDonate(ctx, ctx.carol, usdcAmt);
     const donReceipt = await (
-      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ethers.MaxUint256)
+      await ctx.vault.connect(ctx.carol).donate(vltAmt, usdcAmt, ctx.carol.address, ethers.MaxUint256)
     ).wait();
     const don = await eventArgs(ctx.vault, donReceipt, "Donate");
 

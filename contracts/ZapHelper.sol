@@ -26,6 +26,14 @@ interface IZapHelper {
         address recipient,
         bytes calldata swapData
     ) external returns (uint256 shares);
+    function zapDonate(
+        uint256 usdcAmount,
+        uint256 swapUsdcToVlt,
+        uint256 minVltOut,
+        uint256 deadline,
+        address donor,
+        bytes calldata swapData
+    ) external returns (uint128 liquidityAdded);
 }
 
 interface IPermit2Approve {
@@ -42,6 +50,12 @@ interface IVltUsdcVault {
         uint256 deadline,
         address recipient
     ) external returns (uint256 shares);
+    function donate(
+        uint256 vltAmount,
+        uint256 usdcAmount,
+        address donor,
+        uint256 deadline
+    ) external returns (uint128 liquidityAdded);
 }
 
 /*//////////////////////////////////////////////////////////////////////////
@@ -128,6 +142,45 @@ contract ZapHelper is IZapHelper, ReentrancyGuard {
         IERC20(vlt).forceApprove(vault, vltOut);
         IERC20(usdc).forceApprove(vault, usdcForLp);
         shares = IVltUsdcVault(vault).deposit(vltOut, usdcForLp, minShares, deadline, recipient);
+        IERC20(vlt).forceApprove(vault, 0);
+        IERC20(usdc).forceApprove(vault, 0);
+
+        // Any leftover (vault refund / swap residual) back to the caller.
+        _sweep(vlt, msg.sender);
+        _sweep(usdc, msg.sender);
+    }
+
+    /// @notice USDC-only donation to ALL vault holders: pull USDC, buy VLT for `swapUsdcToVlt`
+    /// of it via the off-chain route (buy pressure, bounded by `minVltOut`), then
+    /// vault.donate() the pair — the vault adds it as liquidity, MINTS NO SHARES, and refunds
+    /// the short leg here; any leftover sweeps back to the caller. The Donate event credits
+    /// `donor` (this helper is only the payer). Same custody-free flow as zapDeposit.
+    function zapDonate(
+        uint256 usdcAmount,
+        uint256 swapUsdcToVlt,
+        uint256 minVltOut,
+        uint256 deadline,
+        address donor,
+        bytes calldata swapData
+    ) external nonReentrant returns (uint128 liquidityAdded) {
+        // Standard periphery-style deadline; second-level miner drift is irrelevant here.
+        // solhint-disable not-rely-on-time
+        // slither-disable-next-line timestamp
+        require(block.timestamp <= deadline, "expired");
+        // solhint-enable not-rely-on-time
+        require(swapUsdcToVlt > 0 && swapUsdcToVlt < usdcAmount, "bad-split");
+        IERC20(usdc).safeTransferFrom(msg.sender, address(this), usdcAmount);
+
+        // Buy VLT from its external market (buy pressure), bounded by minVltOut.
+        uint256 vltOut = _execRoute(usdc, vlt, swapUsdcToVlt, minVltOut, swapData);
+        // USDC for the gift = whatever the swap didn't consume (same banking as zapDeposit).
+        uint256 usdcForLp = IERC20(usdc).balanceOf(address(this));
+
+        // Donate the balanced pair; the vault mints nothing and refunds add-dust here
+        // (this helper is the payer); the event credits `donor`.
+        IERC20(vlt).forceApprove(vault, vltOut);
+        IERC20(usdc).forceApprove(vault, usdcForLp);
+        liquidityAdded = IVltUsdcVault(vault).donate(vltOut, usdcForLp, donor, deadline);
         IERC20(vlt).forceApprove(vault, 0);
         IERC20(usdc).forceApprove(vault, 0);
 

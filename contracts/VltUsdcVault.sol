@@ -39,7 +39,7 @@ pragma solidity 0.8.26;
         Covered by test/vault.fees.test.js.
       - Compound residual dust folds forward into the next compound: it is
         never counted in shares, so it can only ever raise future NAV.
-      - donate(vlt, usdc, deadline): the sanctioned way to push value to ALL
+      - donate(vlt, usdc, donor, deadline): the sanctioned way to push value to ALL
         current holders. Pulls the pair from the caller, adds the maximum
         balanced liquidity at the pool's current price, refunds the short leg,
         and mints NO shares — L grows against a fixed supply, so every
@@ -252,11 +252,15 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     event FeesRetained(uint256 vltFees, uint256 usdcFees);
 
     /// @dev A no-mint liquidity gift to ALL holders at this block. `vltUsed`/`usdcUsed` are the
-    /// amounts the pool actually CONSUMED (the short-leg excess refunds to the donor and never
-    /// appears here). Deliberately separate from Compound/FeesRetained so log-based fee
-    /// accounting stays exact (fees = Σ Compound + Σ FeesRetained) and donated L/share growth
-    /// is attributable on its own (see the feeApr provenance note).
+    /// amounts the pool actually CONSUMED (the short-leg excess refunds to the payer and never
+    /// appears here). `donor` is the attributed gift-giver; `sender` is the payer — for zapped
+    /// donations that is the ZapHelper, so sender != donor distinguishes zapped gifts from
+    /// direct ones (same convention as Deposit). Deliberately separate from Compound/
+    /// FeesRetained so log-based fee accounting stays exact (fees = Σ Compound +
+    /// Σ FeesRetained) and donated L/share growth is attributable on its own (see the feeApr
+    /// provenance note).
     event Donate(
+        address indexed sender,
         address indexed donor,
         uint256 vltUsed,
         uint256 usdcUsed,
@@ -540,13 +544,17 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// value in small tranches and/or submit large one-off donations privately.
     /// @param vltAmount   VLT to pull from the caller (18-dec raw); unconsumed excess refunds.
     /// @param usdcAmount  USDC to pull from the caller (6-dec raw); unconsumed excess refunds.
+    /// @param donor       attributed gift-giver in the Donate event (a periphery zapper passes
+    ///                    the true donor through; direct donors pass themselves). Attribution
+    ///                    only — tokens always pull from and refund to msg.sender.
     /// @param deadline    unix seconds after which this donation reverts (stale-mempool guard).
     /// @return liquidityAdded raw liquidity (L) the donation added for existing holders.
-    function donate(uint256 vltAmount, uint256 usdcAmount, uint256 deadline)
+    function donate(uint256 vltAmount, uint256 usdcAmount, address donor, uint256 deadline)
         external
         nonReentrant
         returns (uint128 liquidityAdded)
     {
+        require(donor != address(0), "zero-donor");
         // Standard periphery-style deadline; second-level miner drift is irrelevant here.
         // solhint-disable not-rely-on-time
         // slither-disable-next-line timestamp
@@ -584,7 +592,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         liquidityAdded = added;
 
         (uint256 vltUsed, uint256 usdcUsed) = _toVltUsdc(paid0, paid1);
-        emit Donate(msg.sender, vltUsed, usdcUsed, added);
+        emit Donate(msg.sender, donor, vltUsed, usdcUsed, added);
     }
 
     /*//////////////////////////////////////////////////////////////
