@@ -78,7 +78,7 @@ vltUSDC is an ERC-20 share over a single full-range Uniswap V4 VLT/USDC position
 - **Smart-contract risk.** Independent audit by Shieldify prior to mainnet deployment.
 
 **Fee-routing constraint (binding, from the Shieldify review):** ecosystem fee routing pushes
-value to holders via **`vault.donate(vlt, usdc, deadline)`** — a swap-free, no-mint liquidity
+value to holders via **`vault.donate(vlt, usdc, donor, deadline)`** — a swap-free, no-mint liquidity
 add at the pool's own price — in small recurring tranches. It does NOT use
 `PoolManager.donate()`, and no routing mechanism may make large one-sided donations to the
 pool: donation-inflated one-sided fee states are the only condition under which the

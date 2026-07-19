@@ -242,14 +242,17 @@ transfers sit in the capturable common pool (M-01 surface) and fold in through t
 swap (L-03 surface), while `PoolManager.donate()` IS the L-03 vector. We added the missing
 primitive at `7b00f25`:
 
-    donate(uint256 vltAmount, uint256 usdcAmount, uint256 deadline) -> uint128 liquidityAdded
+    donate(uint256 vltAmount, uint256 usdcAmount, address donor, uint256 deadline)
+        -> uint128 liquidityAdded
+    ZapHelper.zapDonate(usdcAmount, swapUsdcToVlt, minVltOut, deadline, donor, swapData)
+        -> uint128 liquidityAdded   // USDC-only gift via the whitelisted route
 
 Deposit-minus-mint: pulls the pair from the caller, adds max balanced liquidity at the pool
 price, refunds the short leg, mints no shares. Swap-free and oracle-free; reuses the deposit
 unlock callback verbatim; `totalSupply() > 0` gate; same $100 fold-first trigger as deposit;
-`Donate(donor, vltUsed, usdcUsed, liquidityAdded)` event keeps the fee-accounting identity
+`Donate(sender, donor, vltUsed, usdcUsed, liquidityAdded)` event (payer vs attributed donor, mirroring Deposit) keeps the fee-accounting identity
 exact. Documented JIT caveat (large one-shot donations are front-runnable pro-rata) with an
-operational tranching rule and a pinned characterization test. 6 new tests (77 total), Slither
+operational tranching rule and a pinned characterization test. 8 new tests (79 total), Slither
 0, Solhint clean. **Please include `donate()` in the fixes-review scope.** This also upgrades
 the L-03 posture: routing now has a first-class donation endpoint that cannot create the
 donation-inflated pending-fee state.
