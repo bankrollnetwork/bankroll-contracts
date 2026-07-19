@@ -234,3 +234,22 @@ Low; request the fixes-review round on the Batch A commit.
 - Client updated for the `zap(deadline)` ABI change and the APR label.
 - Remaining: send Batch C responses to Shieldify; request I-02 withdrawal and L-03 re-anchor;
   fixes-review round on the hardening commit.
+
+## Addendum (2026-07-18): `donate()` — new scope for the fixes-review
+
+The review surfaced that the vault had NO sanctioned way to push value to holders: raw
+transfers sit in the capturable common pool (M-01 surface) and fold in through the rebalance
+swap (L-03 surface), while `PoolManager.donate()` IS the L-03 vector. We added the missing
+primitive at `7b00f25`:
+
+    donate(uint256 vltAmount, uint256 usdcAmount, uint256 deadline) -> uint128 liquidityAdded
+
+Deposit-minus-mint: pulls the pair from the caller, adds max balanced liquidity at the pool
+price, refunds the short leg, mints no shares. Swap-free and oracle-free; reuses the deposit
+unlock callback verbatim; `totalSupply() > 0` gate; same $100 fold-first trigger as deposit;
+`Donate(donor, vltUsed, usdcUsed, liquidityAdded)` event keeps the fee-accounting identity
+exact. Documented JIT caveat (large one-shot donations are front-runnable pro-rata) with an
+operational tranching rule and a pinned characterization test. 6 new tests (77 total), Slither
+0, Solhint clean. **Please include `donate()` in the fixes-review scope.** This also upgrades
+the L-03 posture: routing now has a first-class donation endpoint that cannot create the
+donation-inflated pending-fee state.

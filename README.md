@@ -373,6 +373,15 @@ justifications, so Solhint/Slither stay clean.
   dust) reinvests for holders. There is no finder/keeper cut of any kind; the triggering
   depositor simply pays the compound's gas, and the $100 trigger keeps that gas worthwhile
   relative to the amount reinvested.
+- **`donate(vltAmount, usdcAmount, deadline)` — the sanctioned gift path:** pulls the pair
+  from the caller, adds the maximum balanced liquidity at the pool's current price, refunds the
+  short leg, mints NO shares — L/share rises for every holder at that block. Swap-free (nothing
+  to sandwich) and oracle-free (the pool ratio prices the split); donated value never sits in
+  the capturable common pool and never feeds the compound's rebalance swap. Gated on
+  `totalSupply() > 0` (no holders → no one to gift) and runs the same $100 fold-first trigger
+  as `deposit()`. JIT caveat (documented + characterization-tested): large one-shot donations
+  are front-runnable for a pro-rata slice — route recurring value in small tranches and/or
+  submit large one-offs privately.
 - **Bounded fee-timing socialization (Shieldify M-01/L-02, accepted as design):** value outside
   position liquidity (pending pool fees + retained balances + dust) is a common pool that folds
   forward at the next compound; shares enter and exit priced on `L` only. The bound is

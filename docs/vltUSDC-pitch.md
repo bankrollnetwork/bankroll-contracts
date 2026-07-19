@@ -77,12 +77,14 @@ vltUSDC is an ERC-20 share over a single full-range Uniswap V4 VLT/USDC position
 - **Deposit-swap exposure.** The USDC to VLT entry swap (in the replaceable ZapHelper periphery, never the vault) executes an off-chain-computed route, bounded by on-chain `minVltOut` and a deadline.
 - **Smart-contract risk.** Independent audit by Shieldify prior to mainnet deployment.
 
-**Fee-routing constraint (binding, from the Shieldify review):** ecosystem fee routing does NOT
-use `PoolManager.donate()`, and no future routing mechanism may make large one-sided donations
-to the pool. Donation-inflated one-sided fee states are the only condition under which the
+**Fee-routing constraint (binding, from the Shieldify review):** ecosystem fee routing pushes
+value to holders via **`vault.donate(vlt, usdc, deadline)`** — a swap-free, no-mint liquidity
+add at the pool's own price — in small recurring tranches. It does NOT use
+`PoolManager.donate()`, and no routing mechanism may make large one-sided donations to the
+pool: donation-inflated one-sided fee states are the only condition under which the
 deposit-triggered compound's rebalance swap was shown sandwichable (Shieldify L-03; ordinary
-trading-fee states were demonstrated unprofitable to attack). Routing deepens the pool via
-swaps and LP adds only.
+trading-fee states were demonstrated unprofitable to attack). Large one-off donations go
+through `vault.donate()` via private submission (atomic L/share jumps are front-runnable).
 
 ## Parameters
 
