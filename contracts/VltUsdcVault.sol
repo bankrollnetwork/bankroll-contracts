@@ -65,9 +65,9 @@ pragma solidity 0.8.26;
     in the callback is the part most likely to contain a sign/settlement bug.
     Every `_settle`/`_take`/`modifyLiquidity` path is exercised by the Hardhat
     suite (test/) against a REAL PoolManager (local deploy + optional mainnet
-    fork). Shieldify review received 2026-07 (1 Medium / 3 Low / 8 Info against
-    4dae465; hardening applied — see AUDIT-SHIELDIFY-RESPONSE.md). Fixes-review
-    round pending — do not deploy real funds before it concludes.
+    fork). Shieldify FINAL report 2026-07: 11 Informational, 0 Medium/Low (see
+    AUDIT-SHIELDIFY-RESPONSE.md). The post-review additions (donate/zapDonate/
+    permit/previewDeposit/zapRedeem) await their own pass before mainnet.
 //////////////////////////////////////////////////////////////////////////*/
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";

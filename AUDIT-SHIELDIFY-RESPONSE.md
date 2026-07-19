@@ -1,6 +1,48 @@
-# Shieldify Security Review — Response Plan (DRAFT)
+# Shieldify Security Review — Response Plan (RECONCILED — FINAL REPORT IN)
 
-Review commit: `4dae465` · Report received 2026-07-17 · 1 Medium / 3 Low / 8 Info
+Review commit: `4dae465` · Draft report 2026-07-17 (1 Medium / 3 Low / 8 Info) ·
+**Final report 2026-07-19: 11 Informational, 0 Medium/Low** · Fixes reviewed at `ce44c31`
+
+## Final report reconciliation (2026-07-19)
+
+Every ask below was accepted in the final report:
+
+- **M-01 severity dispute accepted** — downgraded past Low straight to Informational
+  (new **I-01**, Acknowledged: the bounded-socialization design model).
+- **Old I-02 withdrawn** — the gas-taxed-no-op finding premised on `REBALANCE_CAP_MULT`
+  (removed pre-review) is gone; the report now has 11 findings, not 12.
+- **L-03 re-anchored and downgraded** — new **I-04** (Info, Acknowledged) quotes the capless
+  `_rebalance(r0, r1)` with our re-anchored line numbers. Its substance is CLOSED on our side:
+  the binding no-`PoolManager.donate()` routing constraint plus the sanctioned
+  `vault.donate()`/`zapDonate` path (added post-fixes-review at `6a938e3`/`2006f11`) mean the
+  donation-created fee state cannot arise from protocol operations.
+- **All eight accepted fixes verified FIXED** at fixes hash `ce44c31`.
+
+Old → new ID map (final statuses):
+
+| Draft ID | Final ID | Status | Notes |
+|---|---|---|---|
+| M-01 | I-01 | Acknowledged | design model; dispute accepted |
+| L-01 | I-02 | Fixed | `require(shares > 0)` |
+| L-02 | I-03 | Acknowledged | socialization / exit purity |
+| L-03 | I-04 | Acknowledged | substance closed by `donate()` + routing constraint |
+| I-01 | I-05 | Fixed | feeApr NatSpec |
+| I-02 | — | **Withdrawn** | premised on removed code |
+| I-03 | I-06 | Fixed | ZapHelper ReentrancyGuard |
+| I-04 | I-07 | Fixed | `zap()` deadline |
+| I-05 | I-08 | Fixed | previewRedeem (clamp variant) |
+| I-06 | I-09 | Fixed | immutable positionKey |
+| I-07 | I-10 | Fixed | self-recipient guard |
+| I-08 | I-11 | Fixed | constructor asserts |
+
+**Still open on the audit track:** the five post-review entrypoints (`donate`, `zapDonate`,
+ERC20Permit surface, `previewDeposit`, `zapRedeem`/`WithPermit` — Addenda 1–2 below) postdate
+the fixes hash and need their own review pass before mainnet. The delivered PDF is kept
+locally (gitignored), not committed.
+
+---
+
+Historical draft below (superseded by the reconciliation above).
 
 This document is the working plan for the fix round: per-finding verdicts checked against the
 actual source at the review hash, paste-ready Team Responses, the fix batch, and the corrections

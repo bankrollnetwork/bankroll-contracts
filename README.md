@@ -409,11 +409,13 @@ justifications, so Solhint/Slither stay clean.
 
 What this workspace does **not** yet do:
 
-1. **Shieldify fixes-review** — the review landed 2026-07-17 (1 Medium / 3 Low / 8 Info
-   against `4dae465`); the hardening batch is applied and the per-finding responses live in
-   `AUDIT-SHIELDIFY-RESPONSE.md` (M-01/L-02 accepted as bounded-by-design socialization —
-   see Design decisions — I-02 disputed as citing removed code, the rest fixed). Remaining:
-   send the Team Responses, then the fixes-review round on the hardened commit.
+1. **Shieldify: new-entrypoint pass** — the FINAL report (2026-07-19) closed the original
+   round at **11 Informational, 0 Medium/Low**: our M-01 severity dispute was accepted
+   (downgraded to Info), the stale-code finding was withdrawn, and the sandwich finding was
+   re-anchored + downgraded (its substance is closed by `donate()` + the no-`PoolManager.donate()`
+   routing constraint). See `AUDIT-SHIELDIFY-RESPONSE.md` for the old→new ID map. Remaining:
+   the five post-review entrypoints (donate/zapDonate/permit/previewDeposit/zapRedeem) need
+   their own review pass before mainnet (fixes hash `ce44c31` predates them).
    NOTE: `AUDIT.MD`/`AUDIT-CODEX.md` line citations are re-anchored after every contract
    change (currently the Shieldify-hardening source) — re-verify them, plus Slither
    (`npm run slither`) + the suite, after any contract change.
