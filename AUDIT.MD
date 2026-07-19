@@ -588,7 +588,8 @@ the document are re-anchored to the post-redesign source (`main` @ `2006f11`).
 
 **Design delta.**
 - **No compound entrypoint of any kind.** The vault's external write surface is now
-  `deposit` and `redeem`, full stop. The former `compound()` logic is the internal
+  `deposit` and `redeem`, full stop. *(Superseded by §7e: `donate` joined the surface on
+  July 18 — still no compound entrypoint.)* The former `compound()` logic is the internal
   `_compound()` leg, reached only from `deposit()`: once `compoundClaimable().valueUsdc`
   reaches **`AUTO_COMPOUND_MIN_USDC` (100e6, a public ungoverned constant)** *and the
   position exists*, the deposit harvests + reinvests before its own liquidity is measured.
@@ -667,6 +668,50 @@ quiet deposit ~237.9k (+16.4k claimable view check vs. main), triggering deposit
 detectors); Solhint clean.**
 
 ---
+
+## 7e. Post-final-report additions (July 18–19, 2026): donate + modern vault/ERC-20 surface
+
+Shieldify's final report (July 19: 11 Informational, 0 Medium/Low; fixes verified at
+`ce44c31`) closed the original round. Immediately after the fixes hash, five entrypoints were
+added — the vault was missing modern vault/ERC-20 features it can never gain post-deploy
+(immutable, ownerless). **These postdate the reviewed hash and await their own Shieldify pass
+before mainnet.** Code: `6a938e3` (donate/zapDonate), `2006f11` (permit/previewDeposit/
+zapRedeem). This section is the authoritative record.
+
+- **`donate(vltAmount, usdcAmount, donor, deadline)`** — the sanctioned no-mint gift path:
+  pulls the pair from `msg.sender`, adds max balanced liquidity at the pool price (reuses the
+  deposit unlock callback verbatim — it never mints; share math lives in `deposit()`), refunds
+  the short leg to the payer, mints no shares → L/share rises for all holders atomically.
+  Guards: `nonReentrant`, deadline, both legs > 0, `donor != 0`, `totalSupply() > 0` (a
+  pre-supply donation would be claimed by the first depositor), and the same $100 fold-first
+  trigger as `deposit()`. Event `Donate(sender ix, donor ix, vltUsed, usdcUsed,
+  liquidityAdded)` — sender=payer vs donor=attributed giver (zapped gifts distinguishable);
+  the fee-accounting identity (fees = Σ Compound + Σ FeesRetained) is untouched. Closes the
+  substance of final-report I-04: value routing uses `vault.donate()`, never
+  `PoolManager.donate()` (binding constraint, pitch doc). **Documented JIT caveat:** L/share
+  jumps atomically, so a large one-shot donation is front-runnable pro-rata
+  (characterization-tested: 90% supply captures 90%); mitigation is operational — small
+  tranches / private submission.
+- **`ZapHelper.zapDonate(usdcAmount, swapUsdcToVlt, minVltOut, deadline, donor, swapData)`** —
+  zapDeposit minus shares: USDC-only gift via the whitelisted route, credits `donor`,
+  custody-free, `nonReentrant`.
+- **`ERC20Permit` on the share token** (EIP-2612; domain "Bankroll VLT-USDC LP" / "1") —
+  gasless share approvals; unaddable post-deploy.
+- **`previewDeposit(vltAmount, usdcAmount) → (shares, vltUsed, usdcUsed)`** — entry-side
+  quote symmetric with `previewRedeem`; exact-match tested against executed deposits (shares
+  equal; consumed amounts round UP as the pool charges, ±1 wei); pre-trigger state,
+  `minShares` binding, never reverts.
+- **`ZapHelper.zapRedeem(shares, minUsdcOut, deadline, receiver, swapData)` +
+  `zapRedeemWithPermit(..., v, r, s, ...)`** — USDC-only exit: pull shares (tolerant
+  try/catch permit in the WithPermit variant), redeem in-kind to the helper, sell the whole
+  VLT leg via the route, deliver under an AGGREGATE `minUsdcOut`. The vault's `redeem` stays
+  swap-free — exit purity holds; the sell leg exists only in the replaceable periphery. A
+  zapped exit shows `owner = helper ≠ receiver` in the Redeem event (zapDeposit convention).
+
+Verification: 85 tests (24 new across `vault.donate.test.js` and
+`vault.permit-preview-zapredeem.test.js`, incl. donate-path reentrancy probe and the JIT
+characterization), Slither 0, Solhint clean; every flow additionally executed against a
+mainnet fork through the browser client.
 
 ## 8. Static & dynamic analysis (re-run for this audit)
 

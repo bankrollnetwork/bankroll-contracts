@@ -11,6 +11,9 @@
 
 ## Executive Summary
 
+*(Scope note, July 19: this review predates the §7e additions — `donate()` joined the write
+surface on July 18, plus zapDonate/ERC20Permit/previewDeposit/zapRedeem. See AUDIT.MD §7e.)*
+
 The current vault is a compact, ownerless, single-position Uniswap V4 LP vault. The external write surface is `deposit()` and `redeem()`; there is no public `compound()` entrypoint and no keeper bounty. Instead, `deposit()` triggers the internal compound leg once `compoundClaimable().valueUsdc` reaches `AUTO_COMPOUND_MIN_USDC`, then prices the depositor after that fold-in.
 
 With the project economics made explicit, I consider this a clean audit: no Critical, High, Medium, or Low findings. The remaining notes are informational design assumptions/tradeoffs to document and monitor.

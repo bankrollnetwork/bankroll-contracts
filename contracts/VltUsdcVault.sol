@@ -22,8 +22,8 @@ pragma solidity 0.8.26;
         exists). Fees are collected and 100% reinvests as liquidity — NO fee
         of any kind is taken. Mints NO shares, so L grows against a fixed
         share supply => every holder's redemption value rises automatically.
-        There is NO compound entrypoint and no keeper: the vault's external
-        write surface is deposit and redeem, full stop — compounding is purely
+        There is NO compound entrypoint and no keeper: the write surface is
+        deposit, redeem, and the no-mint donate — compounding is purely
         a side effect of deposits (a small deposit forces one in a quiet
         market). Deposit and compound share fate by design — the leg is
         argument-free and its swap is bounded to a ≤5% price move (unfilled

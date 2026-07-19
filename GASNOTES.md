@@ -1,7 +1,8 @@
 # Gas notes: deposit-triggered auto-compound (branch-only notes)
 
 Final design on this branch: **deposit-triggered compounding with no fee of any kind and NO
-compound entrypoint** — the external write surface is `deposit` + `redeem`, full stop.
+compound entrypoint** — the external write surface is `deposit` + `redeem` + the no-mint
+`donate` (added post-audit, AUDIT.MD §7e; ~207.9k gas — cheaper than a deposit, no mint).
 `deposit()` (external, `nonReentrant`) checks `compoundClaimable()` and, at
 `AUTO_COMPOUND_MIN_USDC` ($100, ungoverned constant) with the position existing (the pre-seed
 gate — see AUDIT.MD §7d M-01), calls the internal `_compound()` directly. 100% of every
