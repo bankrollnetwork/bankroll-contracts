@@ -39,6 +39,17 @@ pragma solidity 0.8.26;
         Covered by test/vault.fees.test.js.
       - Compound residual dust folds forward into the next compound: it is
         never counted in shares, so it can only ever raise future NAV.
+      - donate(vlt, usdc, deadline): the sanctioned way to push value to ALL
+        current holders. Pulls the pair from the caller, adds the maximum
+        balanced liquidity at the pool's current price, refunds the short leg,
+        and mints NO shares — L grows against a fixed supply, so every
+        holder's redemption value rises at that block. Swap-free (nothing to
+        sandwich: a skewed price only changes which leg refunds; the vault
+        sells nothing) and oracle-free (the pool ratio prices the split).
+        Donated value never sits in the capturable common pool and never
+        feeds the compound's rebalance swap. JIT NOTE: a LARGE one-shot
+        donation can be front-run (deposit) / back-run (redeem) to skim a
+        pro-rata slice — route value in small tranches or submit privately.
       - Bounded fee-timing socialization (accepted design; Shieldify M-01/L-02):
         value outside L (pending fees + retained balances + dust) is a common
         pool for ALL holders; shares enter and exit priced on L only. Because
@@ -239,6 +250,18 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
     /// retention split, see the header). Without this event those harvests are invisible in the
     /// logs, and event-based fee accounting would systematically under-report between compounds.
     event FeesRetained(uint256 vltFees, uint256 usdcFees);
+
+    /// @dev A no-mint liquidity gift to ALL holders at this block. `vltUsed`/`usdcUsed` are the
+    /// amounts the pool actually CONSUMED (the short-leg excess refunds to the donor and never
+    /// appears here). Deliberately separate from Compound/FeesRetained so log-based fee
+    /// accounting stays exact (fees = Σ Compound + Σ FeesRetained) and donated L/share growth
+    /// is attributable on its own (see the feeApr provenance note).
+    event Donate(
+        address indexed donor,
+        uint256 vltUsed,
+        uint256 usdcUsed,
+        uint128 liquidityAdded
+    );
 
     /*//////////////////////////////////////////////////////////////
                                CONSTRUCTOR
@@ -497,6 +520,71 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         _mint(recipient, shares);
         (uint256 vltUsed, uint256 usdcUsed) = _toVltUsdc(paid0, paid1);
         emit Deposit(msg.sender, recipient, vltUsed, usdcUsed, shares, liquidityAdded);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                  DONATE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Gift value to ALL current holders: pull a (roughly balanced) VLT + USDC pair from
+    /// the caller, add the maximum balanced liquidity at the pool's current price, refund the
+    /// short-leg remainder — and mint NO shares, so L grows against a fixed supply and every
+    /// holder's redemption value rises at this block. This is the sanctioned donation path:
+    /// swap-free (nothing to sandwich — a skewed price only changes which leg refunds; the vault
+    /// sells nothing), oracle-free (the pool ratio prices the split), and atomic (donated value
+    /// never sits in the retained common pool, so it is never entrant-capturable and never feeds
+    /// the compound's rebalance swap). Use THIS, never PoolManager.donate() (see the pitch's
+    /// fee-routing constraint) and never a raw token transfer.
+    /// @dev JIT NOTE: L/share jumps atomically, so a LARGE one-shot donation can be front-run
+    /// (deposit) and back-run (redeem) to skim a pro-rata slice of the gift. Route recurring
+    /// value in small tranches and/or submit large one-off donations privately.
+    /// @param vltAmount   VLT to pull from the caller (18-dec raw); unconsumed excess refunds.
+    /// @param usdcAmount  USDC to pull from the caller (6-dec raw); unconsumed excess refunds.
+    /// @param deadline    unix seconds after which this donation reverts (stale-mempool guard).
+    /// @return liquidityAdded raw liquidity (L) the donation added for existing holders.
+    function donate(uint256 vltAmount, uint256 usdcAmount, uint256 deadline)
+        external
+        nonReentrant
+        returns (uint128 liquidityAdded)
+    {
+        // Standard periphery-style deadline; second-level miner drift is irrelevant here.
+        // solhint-disable not-rely-on-time
+        // slither-disable-next-line timestamp
+        require(block.timestamp <= deadline, "expired");
+        // solhint-enable not-rely-on-time
+        require(vltAmount > 0 && usdcAmount > 0, "zero-donation");
+        // No holders => no one to gift: shares redeem against TOTAL position liquidity, so a
+        // pre-supply donation would simply be claimed pro-rata by the FIRST depositor. The
+        // supply gate also guarantees the position exists (dead shares anchor liquidity).
+        require(totalSupply() > 0, "no-holders");
+
+        // Same fold-first line as deposit(): a donor is as good a compound trigger as a
+        // depositor, and no donation lands on top of >= $100 of capturable common pool.
+        (,, uint256 claimableUsdc,) = compoundClaimable();
+        if (claimableUsdc >= AUTO_COMPOUND_MIN_USDC && positionLiquidity() > 0) {
+            _compound();
+        }
+
+        // Pre-existing vault balances stay vault-owned, exactly as in deposit().
+        uint256 retain0 = _selfBalance(currency0);
+        uint256 retain1 = _selfBalance(currency1);
+
+        vlt.safeTransferFrom(msg.sender, address(this), vltAmount);
+        usdc.safeTransferFrom(msg.sender, address(this), usdcAmount);
+
+        // Reuses the deposit callback VERBATIM — it never mints (share math lives in deposit())
+        // and it refunds the payer, so the donor's short leg comes straight back to them.
+        // Same pre-call-snapshot rationale as deposit(): the heuristic is a false positive.
+        // slither-disable-next-line reentrancy-balance
+        bytes memory res = poolManager.unlock(
+            abi.encode(Action.DEPOSIT, abi.encode(DepositData(msg.sender, retain0, retain1)))
+        );
+        (uint128 added, uint256 paid0, uint256 paid1) = abi.decode(res, (uint128, uint256, uint256));
+        require(added > 0, "no-liquidity-added");
+        liquidityAdded = added;
+
+        (uint256 vltUsed, uint256 usdcUsed) = _toVltUsdc(paid0, paid1);
+        emit Donate(msg.sender, vltUsed, usdcUsed, added);
     }
 
     /*//////////////////////////////////////////////////////////////
