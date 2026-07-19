@@ -256,3 +256,24 @@ operational tranching rule and a pinned characterization test. 8 new tests (79 t
 0, Solhint clean. **Please include `donate()` in the fixes-review scope.** This also upgrades
 the L-03 posture: routing now has a first-class donation endpoint that cannot create the
 donation-inflated pending-fee state.
+
+## Addendum 2 (2026-07-19): LP-completeness batch — additional fixes-review scope
+
+Reviewing the surface for other missing primitives after `donate()` surfaced three, all landed
+at `2006f11`:
+
+1. **`ERC20Permit` on the vltUSDC share token** (EIP-2612; name "Bankroll VLT-USDC LP",
+   version "1"). Now-or-never on an immutable contract; enables gasless share approvals for
+   periphery and integrators.
+2. **`previewDeposit(vltAmount, usdcAmount) → (shares, vltUsed, usdcUsed)`** — the entry-side
+   quote symmetric with `previewRedeem`. Pre-trigger state, `minShares` stays the binding
+   protection, never reverts (mirrors the I-05 clamp philosophy).
+3. **`ZapHelper.zapRedeem` / `zapRedeemWithPermit`** — USDC-only exit through the periphery:
+   pull shares (permit variant needs no prior approval; tolerant try/catch permit), redeem
+   in-kind to the helper, sell the whole VLT leg via the whitelisted route, deliver USDC under
+   an AGGREGATE `minUsdcOut` bound. The vault's `redeem` remains swap-free — exit purity holds;
+   the sell leg exists only in the replaceable periphery. In the vault's Redeem event a zapped
+   exit shows owner = helper (≠ end receiver), mirroring the zapDeposit convention.
+
+85 tests green (6 new), Slither 0, Solhint clean. **Please include all three in the
+fixes-review scope** along with `donate()`/`zapDonate()`.

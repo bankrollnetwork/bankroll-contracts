@@ -384,6 +384,16 @@ justifications, so Solhint/Slither stay clean.
   gifts via the whitelisted route) credits the true donor. JIT caveat (documented +
   characterization-tested): large one-shot donations are front-runnable for a pro-rata slice —
   route recurring value in small tranches and/or submit large one-offs privately.
+- **ERC20Permit shares + entry-side preview + USDC-only exit (LP-completeness batch):**
+  vltUSDC is `ERC20Permit` (EIP-2612, name "Bankroll VLT-USDC LP", version "1") — gasless share
+  approvals, deliberately added pre-deploy because it cannot be retrofitted onto the immutable
+  vault. `previewDeposit(vlt, usdc) → (shares, vltUsed, usdcUsed)` is the ERC-4626-style entry
+  quote (pre-trigger state; `minShares` remains the binding protection; never reverts).
+  `ZapHelper.zapRedeem(shares, minUsdcOut, deadline, receiver, swapData)` (+`WithPermit`
+  variant: one tx, no prior approval) completes the USDC-in/USDC-out story — redeem in-kind to
+  the helper, sell the VLT leg via the whitelisted route, aggregate `minUsdcOut` bound. The
+  vault's `redeem` itself still never swaps: the sell leg lives only in the replaceable
+  periphery.
 - **Bounded fee-timing socialization (Shieldify M-01/L-02, accepted as design):** value outside
   position liquidity (pending pool fees + retained balances + dust) is a common pool that folds
   forward at the next compound; shares enter and exit priced on `L` only. The bound is
