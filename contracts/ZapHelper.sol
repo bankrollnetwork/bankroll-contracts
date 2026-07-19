@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 
 interface IZapHelper {
     function router() external view returns (address);
@@ -34,6 +35,23 @@ interface IZapHelper {
         address donor,
         bytes calldata swapData
     ) external returns (uint128 liquidityAdded);
+    function zapRedeem(
+        uint256 shares,
+        uint256 minUsdcOut,
+        uint256 deadline,
+        address receiver,
+        bytes calldata swapData
+    ) external returns (uint256 usdcOut);
+    function zapRedeemWithPermit(
+        uint256 shares,
+        uint256 minUsdcOut,
+        uint256 deadline,
+        address receiver,
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        bytes calldata swapData
+    ) external returns (uint256 usdcOut);
 }
 
 interface IPermit2Approve {
@@ -56,6 +74,7 @@ interface IVltUsdcVault {
         address donor,
         uint256 deadline
     ) external returns (uint128 liquidityAdded);
+    function redeem(uint256 shares, address receiver) external returns (uint256 vltAmount, uint256 usdcAmount);
 }
 
 /*//////////////////////////////////////////////////////////////////////////
@@ -187,6 +206,74 @@ contract ZapHelper is IZapHelper, ReentrancyGuard {
         // Any leftover (vault refund / swap residual) back to the caller.
         _sweep(vlt, msg.sender);
         _sweep(usdc, msg.sender);
+    }
+
+    /// @notice USDC-only exit: pull `shares` of vltUSDC from the caller, redeem them in-kind
+    /// (both tokens land here), sell the ENTIRE VLT leg for USDC via the off-chain route, and
+    /// deliver everything to `receiver`. `minUsdcOut` bounds the TOTAL USDC delivered (redeemed
+    /// USDC + swap proceeds) — the aggregate is what the exiter cares about, so the route's own
+    /// per-leg minOut is unused. Any VLT residue the route leaves (should be ~0) also goes to
+    /// `receiver` — the proceeds belong to the exiter; nothing stays here. In the vault's Redeem
+    /// event owner = this helper and receiver = `receiver`, so owner != receiver marks a zapped
+    /// exit (mirroring Deposit's sender/recipient convention). The vault's redeem itself never
+    /// swaps — this convenience layer is where the sell leg lives, keeping exit purity intact.
+    function zapRedeem(
+        uint256 shares,
+        uint256 minUsdcOut,
+        uint256 deadline,
+        address receiver,
+        bytes calldata swapData
+    ) external nonReentrant returns (uint256 usdcOut) {
+        return _zapRedeem(shares, minUsdcOut, deadline, receiver, swapData);
+    }
+
+    /// @notice zapRedeem with an EIP-2612 permit on the vltUSDC shares — single tx, no prior
+    /// approval. Tolerant permit (try/catch): if a front-runner already consumed the signature,
+    /// the transferFrom below still succeeds on the allowance that consumption set.
+    function zapRedeemWithPermit(
+        uint256 shares,
+        uint256 minUsdcOut,
+        uint256 deadline,
+        address receiver,
+        uint8 v,
+        bytes32 r,
+        bytes32 s,
+        bytes calldata swapData
+    ) external nonReentrant returns (uint256 usdcOut) {
+        // Tolerant permit: if a front-runner already submitted this signature, the catch path
+        // proceeds on the allowance that submission set.
+        // solhint-disable-next-line no-empty-blocks
+        try IERC20Permit(vault).permit(msg.sender, address(this), shares, deadline, v, r, s) {} catch {}
+        return _zapRedeem(shares, minUsdcOut, deadline, receiver, swapData);
+    }
+
+    /// @dev Shared exit flow for both zapRedeem variants (each external wrapper is nonReentrant).
+    function _zapRedeem(
+        uint256 shares,
+        uint256 minUsdcOut,
+        uint256 deadline,
+        address receiver,
+        bytes calldata swapData
+    ) internal returns (uint256 usdcOut) {
+        // Standard periphery-style deadline; second-level miner drift is irrelevant here.
+        // solhint-disable not-rely-on-time
+        // slither-disable-next-line timestamp
+        require(block.timestamp <= deadline, "expired");
+        // solhint-enable not-rely-on-time
+        IERC20(vault).safeTransferFrom(msg.sender, address(this), shares);
+        // Redeem to THIS helper (it burns the helper's own shares — no vault-side allowance).
+        // slither-disable-next-line unused-return
+        IVltUsdcVault(vault).redeem(shares, address(this));
+
+        // Sell the whole VLT leg; the aggregate minUsdcOut below is the real slippage bound.
+        uint256 vltBal = IERC20(vlt).balanceOf(address(this));
+        // slither-disable-next-line incorrect-equality
+        if (vltBal > 0) _execRoute(vlt, usdc, vltBal, 0, swapData);
+
+        usdcOut = IERC20(usdc).balanceOf(address(this));
+        require(usdcOut >= minUsdcOut, "zap-slippage");
+        IERC20(usdc).safeTransfer(receiver, usdcOut);
+        _sweep(vlt, receiver);
     }
 
     /// @notice Raw swap primitive: pull `amountIn` of `tokenIn`, execute the route, forward the

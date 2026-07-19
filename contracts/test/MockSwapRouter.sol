@@ -30,6 +30,17 @@ contract MockSwapRouter {
         IERC20(vlt).safeTransfer(to, out);
     }
 
+    /// Spend `amountIn` VLT (pulled from caller), receive USDC at the constant-product price
+    /// (0.3% fee), sent to `to` — the reverse leg, used by zapRedeem tests.
+    function swapVltForUsdc(uint256 amountIn, address to) external returns (uint256 out) {
+        uint256 rIn = IERC20(vlt).balanceOf(address(this));
+        uint256 rOut = IERC20(usdc).balanceOf(address(this));
+        IERC20(vlt).safeTransferFrom(msg.sender, address(this), amountIn);
+        uint256 amountInWithFee = (amountIn * 997) / 1000;
+        out = (rOut * amountInWithFee) / (rIn + amountInWithFee);
+        IERC20(usdc).safeTransfer(to, out);
+    }
+
     function vltReserve() external view returns (uint256) {
         return IERC20(vlt).balanceOf(address(this));
     }

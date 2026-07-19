@@ -86,13 +86,14 @@ import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 // Fully ownerless / immutable: no admin, no pause, no sweep. Every parameter is fixed at deploy
 // or a constant; deposit/redeem are permissionless and compounding is deposit-triggered.
-contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
+contract VltUsdcVault is ERC20, ERC20Permit, ReentrancyGuard, IUnlockCallback {
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -278,7 +279,7 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         IPoolManager _poolManager,
         PoolKey memory _key,
         address _usdc
-    ) ERC20("Bankroll VLT-USDC LP", "vltUSDC") {
+    ) ERC20("Bankroll VLT-USDC LP", "vltUSDC") ERC20Permit("Bankroll VLT-USDC LP") {
         require(address(_key.hooks) == address(0), "hooks-not-allowed");
         require(Currency.unwrap(_key.currency0) < Currency.unwrap(_key.currency1), "token-order");
         // The vault is immutable and ownerless — a misdeployment is unrecoverable, so the
@@ -373,6 +374,46 @@ contract VltUsdcVault is ERC20, ReentrancyGuard, IUnlockCallback {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
         valueUsdc = _valueInUsdc(amount0, amount1, uint256(sqrtPriceX96));
         feesValueUsdc = _valueInUsdc(pending0, pending1, uint256(sqrtPriceX96));
+    }
+
+    /// @notice Two-token analog of ERC-4626 `previewDeposit`: the shares a deposit of
+    /// (vltAmount, usdcAmount) would mint at the CURRENT pool state, and the amounts the pool
+    /// would actually consume, WITHOUT executing. Quotes the pre-trigger state: if the deposit
+    /// itself fires the auto-compound, realized shares differ (each share is worth more L) —
+    /// deposit()'s `minShares` is the binding protection, exactly as previewRedeem pairs with
+    /// redeem(). Consumed amounts are rounded UP as the pool charges an adder (the executed
+    /// settle can differ by 1 wei). Never reverts on unusual input: returns zeros when the
+    /// amounts carry no liquidity.
+    function previewDeposit(uint256 vltAmount, uint256 usdcAmount)
+        public
+        view
+        returns (uint256 shares, uint256 vltUsed, uint256 usdcUsed)
+    {
+        (uint256 amount0, uint256 amount1) =
+            usdcIsCurrency0 ? (usdcAmount, vltAmount) : (vltAmount, usdcAmount);
+        // slither-disable-next-line unused-return
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolKey.toId());
+        uint128 liquidity = _liquidityForAmounts(sqrtPriceX96, amount0, amount1);
+        // slither-disable-next-line incorrect-equality
+        if (liquidity == 0) return (0, 0, 0);
+
+        uint256 supply = totalSupply();
+        // slither-disable-next-line incorrect-equality
+        if (supply == 0) {
+            // First-deposit branch: MINIMUM_LIQUIDITY is locked to the dead address.
+            shares = liquidity > MINIMUM_LIQUIDITY ? liquidity - MINIMUM_LIQUIDITY : 0;
+        } else {
+            // supply > 0 implies positionLiquidity() > 0 (dead shares anchor the position).
+            shares = (supply * uint256(liquidity)) / positionLiquidity();
+        }
+        // roundUp=true mirrors the amounts V4 charges on a positive-delta modifyLiquidity.
+        uint256 used0 = SqrtPriceMath.getAmount0Delta(
+            sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickUpper), liquidity, true
+        );
+        uint256 used1 = SqrtPriceMath.getAmount1Delta(
+            TickMath.getSqrtPriceAtTick(tickLower), sqrtPriceX96, liquidity, true
+        );
+        (vltUsed, usdcUsed) = _toVltUsdc(used0, used1);
     }
 
     /// @notice Two-token analog of ERC-4626 `previewRedeem`: the principal (VLT, USDC) a
