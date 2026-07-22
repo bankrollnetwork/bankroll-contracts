@@ -20,7 +20,9 @@
     "pool:create": "hardhat run scripts/00_create_and_init_pool.js",
     "deploy": "hardhat run scripts/01_deploy_vault.js",
     "seed": "hardhat run scripts/02_seed_first_deposit.js",
-    "verify:vault": "hardhat run scripts/03_verify_etherscan.js"
+    "verify:vault": "hardhat run scripts/03_verify_etherscan.js",
+    "launch:mainnet": "hardhat run scripts/launch.js --network mainnet",
+    "launch:rehearse": "hardhat run scripts/launch.js --network localhost"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "5.0.0",
