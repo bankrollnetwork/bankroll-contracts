@@ -1,0 +1,16 @@
+{
+  "network": "mainnet",
+  "chainId": 1,
+  "block": 25584890,
+  "timestamp": "2026-07-22T01:09:11.000Z",
+  "poolManager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+  "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+  "vlt": "0x6b785a0322126826d8226d77e173d75DAfb84d11",
+  "fee": 10000,
+  "tickSpacing": 200,
+  "vault": "0xee8d4c5c768AadCd3517Aa8C908De300305D0A7f",
+  "zapHelper": "0x348A57b1dc6E3dCAa645DE6e4E864924B410525D",
+  "router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+  "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+  "seedTx": "0x2edb91993b09457b9649ff687cbc38530bc3b5c6429d82b10ee209a6ed500c6c"
+}

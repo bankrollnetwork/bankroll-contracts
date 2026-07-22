@@ -35,10 +35,18 @@ Old → new ID map (final statuses):
 | I-07 | I-10 | Fixed | self-recipient guard |
 | I-08 | I-11 | Fixed | constructor asserts |
 
-**Still open on the audit track:** the five post-review entrypoints (`donate`, `zapDonate`,
-ERC20Permit surface, `previewDeposit`, `zapRedeem`/`WithPermit` — Addenda 1–2 below) postdate
-the fixes hash and need their own review pass before mainnet. The delivered PDF is kept
-locally (gitignored), not committed.
+**Audit track CLOSED on design (2026-07-22):** Shieldify approved the five post-review
+entrypoints (Addenda 1–2 below). Remaining formality: their confirmation of the final
+DEPLOYED contracts. Handoff for that review:
+
+- Vault: `0xee8d4c5c768AadCd3517Aa8C908De300305D0A7f` (Etherscan-verified)
+- ZapHelper: `0x348A57b1dc6E3dCAa645DE6e4E864924B410525D` (Etherscan-verified)
+- Deployed 2026-07-22, block 25584890; pool initialized @ $0.3567/VLT; seeded ~$40
+  (tx `0x2edb91993b09457b9649ff687cbc38530bc3b5c6429d82b10ee209a6ed500c6c`)
+- The deployed bytecode compiles from the same contract sources as review head `8511f6f`
+  (contracts unchanged since `2006f11`; later commits touch only comments/docs/tooling)
+
+The delivered PDF is kept locally (gitignored), not committed.
 
 ---
 

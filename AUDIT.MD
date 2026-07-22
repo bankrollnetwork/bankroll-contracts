@@ -674,8 +674,8 @@ detectors); Solhint clean.**
 Shieldify's final report (July 19: 11 Informational, 0 Medium/Low; fixes verified at
 `ce44c31`) closed the original round. Immediately after the fixes hash, five entrypoints were
 added — the vault was missing modern vault/ERC-20 features it can never gain post-deploy
-(immutable, ownerless). **These postdate the reviewed hash and await their own Shieldify pass
-before mainnet.** Code: `6a938e3` (donate/zapDonate), `2006f11` (permit/previewDeposit/
+(immutable, ownerless). **Shieldify approved these additions on 2026-07-22; the remaining formality is their
+confirmation of the FINAL DEPLOYED contracts on mainnet (addresses below).** Code: `6a938e3` (donate/zapDonate), `2006f11` (permit/previewDeposit/
 zapRedeem). This section is the authoritative record.
 
 - **`donate(vltAmount, usdcAmount, donor, deadline)`** — the sanctioned no-mint gift path:

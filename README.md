@@ -409,13 +409,12 @@ justifications, so Solhint/Slither stay clean.
 
 What this workspace does **not** yet do:
 
-1. **Shieldify: new-entrypoint pass** — the FINAL report (2026-07-19) closed the original
-   round at **11 Informational, 0 Medium/Low**: our M-01 severity dispute was accepted
-   (downgraded to Info), the stale-code finding was withdrawn, and the sandwich finding was
-   re-anchored + downgraded (its substance is closed by `donate()` + the no-`PoolManager.donate()`
-   routing constraint). See `AUDIT-SHIELDIFY-RESPONSE.md` for the old→new ID map. Remaining:
-   the five post-review entrypoints (donate/zapDonate/permit/previewDeposit/zapRedeem) need
-   their own review pass before mainnet (fixes hash `ce44c31` predates them).
+1. **DONE — launched on mainnet 2026-07-22** (block 25584890, via `scripts/launch.js`):
+   vault `0xee8d4c5c768AadCd3517Aa8C908De300305D0A7f`, ZapHelper
+   `0x348A57b1dc6E3dCAa645DE6e4E864924B410525D`, pool @ $0.3567/VLT, seeded ~$40. Audit:
+   final report **11 Informational, 0 Medium/Low**; the five added entrypoints approved
+   2026-07-22. Remaining formality: Shieldify's confirmation of the deployed contracts
+   (handoff details in `AUDIT-SHIELDIFY-RESPONSE.md`).
    NOTE: `AUDIT.MD`/`AUDIT-CODEX.md` line citations are re-anchored after every contract
    change (currently the Shieldify-hardening source) — re-verify them, plus Slither
    (`npm run slither`) + the suite, after any contract change.

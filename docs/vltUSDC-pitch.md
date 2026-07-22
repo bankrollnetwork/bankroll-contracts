@@ -98,6 +98,6 @@ through `vault.donate()` via private submission (atomic L/share jumps are front-
 | VLT token | 0x6b785a0322126826d8226d77e173d75DAfb84d11 |
 | Vault contract | 0xee8d4c5c768AadCd3517Aa8C908De300305D0A7f (deployed 2026-07-22) |
 | ZapHelper (periphery) | 0x348A57b1dc6E3dCAa645DE6e4E864924B410525D |
-| Audit | Shieldify — final report: 11 Informational, 0 Medium/Low (post-report additions awaiting follow-up pass; see AUDIT.MD §7e) |
+| Audit | Shieldify — final report: 11 Informational, 0 Medium/Low; added entrypoints approved (deployed-contract confirmation in progress) |
 
 *Technical summary for evaluation only; not a specification or audit, and subject to change prior to deployment.*

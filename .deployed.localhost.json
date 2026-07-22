@@ -1,0 +1,16 @@
+{
+  "network": "localhost",
+  "chainId": 1337,
+  "block": 25217517,
+  "timestamp": "2026-08-02T13:58:40.000Z",
+  "poolManager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+  "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+  "vlt": "0x6b785a0322126826d8226d77e173d75DAfb84d11",
+  "fee": 10000,
+  "tickSpacing": 200,
+  "vault": "0xb2dCC846ac7aA3F15E48A65853582f0ADfD8c7CF",
+  "zapHelper": "0xF5ee7be818B77ED0b65F7e68a3f5714285b6a232",
+  "router": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+  "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+  "seedTx": "0x5a1d5bb54ca3d4b8cc210246376fef1496ac0ce96169ded1f3dbb4c62eda5f14"
+}
