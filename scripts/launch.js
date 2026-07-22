@@ -22,7 +22,11 @@
 
 const fs = require("fs");
 const hre = require("hardhat");
-const { ethers } = hre;
+// PLAIN ethers for every transaction: hardhat-ethers' signer wrapper polls getTransaction on
+// pending txs, and some RPCs (Alchemy) return `to: ""` for pending contract creations, which
+// its formatter rejects — crashing the watcher AFTER a successful broadcast (observed live).
+// Plain ethers builds the TransactionResponse from the signed tx and polls receipts only.
+const { ethers } = require("ethers");
 const { resolveConfig, buildPoolKey } = require("./config");
 const { readSqrtPriceX96, priceUsdcPerVlt } = require("./lib/pool");
 const { encodeSqrtRatioX96 } = require("../test/helpers/math");
@@ -48,9 +52,8 @@ function fmt(x, d) {
 
 // Live external VLT price in USDC: V2 VLT/WETH reserves × V3 USDC/WETH spot. Returns null when
 // the venues aren't readable (e.g. a mock-local chain) — callers treat that as "no reference".
-async function liveExternalPrice() {
+async function liveExternalPrice(p) {
   try {
-    const p = ethers.provider;
     const pair = new ethers.Contract(
       V2_VLT_WETH,
       ["function getReserves() view returns (uint112,uint112,uint32)", "function token0() view returns (address)"],
@@ -74,14 +77,28 @@ async function liveExternalPrice() {
   }
 }
 
+async function contractFactory(name, signer) {
+  const art = await hre.artifacts.readArtifact(name);
+  return new ethers.ContractFactory(art.abi, art.bytecode, signer);
+}
+async function contractAt(name, address, runner) {
+  const art = await hre.artifacts.readArtifact(name);
+  return new ethers.Contract(address, art.abi, runner);
+}
+
 async function main() {
   const armed = process.env.LAUNCH === "yes";
   const cfg = resolveConfig(hre.network.name);
   const { poolKey, usdcIsCurrency0 } = buildPoolKey(cfg.vlt, cfg.usdc, cfg.fee, cfg.tickSpacing);
-  const [signer] = await ethers.getSigners();
-  const provider = ethers.provider;
-  const net = await provider.getNetwork();
+  const url = hre.network.config.url;
+  if (!url) throw new Error("launch.js needs an RPC-backed network (mainnet/sepolia/localhost).");
+  const provider = new ethers.JsonRpcProvider(url);
   const isLive = hre.network.name === "mainnet" || hre.network.name === "sepolia";
+  // Live networks sign locally with the deployer key; dev nodes use their unlocked account 0.
+  const signer = isLive
+    ? new ethers.Wallet(process.env.DEPLOYER_PRIVATE_KEY, provider)
+    : await provider.getSigner(0);
+  const net = await provider.getNetwork();
 
   const usdc = new ethers.Contract(cfg.usdc, ERC20_ABI, signer);
   const vlt = new ethers.Contract(cfg.vlt, ERC20_ABI, signer);
@@ -92,9 +109,9 @@ async function main() {
   const ethBal = await provider.getBalance(signer.address);
   const usdcBal = await usdc.balanceOf(signer.address);
   const vltBal = await vlt.balanceOf(signer.address);
-  const poolSqrtP = await readSqrtPriceX96(cfg.poolManager, poolKey);
+  const poolSqrtP = await readSqrtPriceX96(cfg.poolManager, poolKey, provider);
   const poolInitialized = poolSqrtP !== 0n;
-  const live = await liveExternalPrice();
+  const live = await liveExternalPrice(provider);
 
   const initPriceStr = process.env.INIT_USDC_PER_VLT;
   const seedUsdcStr = process.env.SEED_USDC;
@@ -126,7 +143,7 @@ async function main() {
   }
 
   const vaultSeeded = cfg.vaultAddress
-    ? (await (await ethers.getContractAt("VltUsdcVault", cfg.vaultAddress)).totalSupply()) > 0n
+    ? (await (await contractAt("VltUsdcVault", cfg.vaultAddress, provider)).totalSupply()) > 0n
     : false;
   if (!vaultSeeded) {
     check(!!(seedUsdc && seedVlt), "seed config", `SEED_USDC=${seedUsdcStr || "?"} SEED_VLT=${seedVltStr || "?"}`);
@@ -176,7 +193,7 @@ async function main() {
     const amount0 = usdcIsCurrency0 ? usdcRef : vltRef;
     const amount1 = usdcIsCurrency0 ? vltRef : usdcRef;
     const sqrtPriceX96 = encodeSqrtRatioX96(amount1, amount0);
-    const pm = await ethers.getContractAt("IPoolManager", cfg.poolManager);
+    const pm = await contractAt("IPoolManager", cfg.poolManager, signer);
     await (await pm.initialize(poolKey, sqrtPriceX96)).wait();
     console.log(`✓ pool initialized @ $${price}/VLT (sqrtPriceX96=${sqrtPriceX96})`);
   } else {
@@ -186,7 +203,7 @@ async function main() {
   // Step 1: vault.
   let vaultAddr = cfg.vaultAddress;
   if (!vaultAddr) {
-    const Vault = await ethers.getContractFactory("VltUsdcVault");
+    const Vault = await contractFactory("VltUsdcVault", signer);
     const vault = await Vault.deploy(cfg.poolManager, poolKey, cfg.usdc);
     await vault.waitForDeployment();
     vaultAddr = vault.target;
@@ -199,7 +216,7 @@ async function main() {
   let zapAddr = cfg.zapHelper;
   if (!zapAddr) {
     if (!cfg.router) throw new Error("No router for this network (ZAP_ROUTER_ADDRESS).");
-    const Zap = await ethers.getContractFactory("ZapHelper");
+    const Zap = await contractFactory("ZapHelper", signer);
     const zap = await Zap.deploy(cfg.router, cfg.permit2, vaultAddr);
     await zap.waitForDeployment();
     zapAddr = zap.target;
@@ -209,7 +226,7 @@ async function main() {
   }
 
   // Step 2: seed (skipped when supply exists — resume-safe).
-  const vault = await ethers.getContractAt("VltUsdcVault", vaultAddr);
+  const vault = await contractAt("VltUsdcVault", vaultAddr, signer);
   let seedTx = null;
   if ((await vault.totalSupply()) === 0n) {
     await (await vlt.approve(vaultAddr, seedVlt)).wait();
